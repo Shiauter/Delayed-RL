@@ -37,15 +37,14 @@ def collect_data(env_name, model: Actor, conn):
                 "probs": prob[delay_a].detach().view(-1),
                 "rewards": torch.tensor(r / 100.0).detach().view(-1),
                 "states_prime": torch.from_numpy(s_prime).detach(),
-                # "h_ins": tuple(map(lambda t: t.detach(), h_in)),
-                # "h_outs": tuple(map(lambda t: t.detach(), h_out)),
-                "dones": torch.tensor(0 if done else 1).detach().view(-1),
+                "dones": torch.tensor(0.0 if done else 1.0).detach().view(-1),
                 "timesteps": torch.tensor(t).detach().view(-1),
                 "a_lsts": torch.tensor(a_lst).detach().view(-1)
             }
             memory.store(**exp)
-            s = s_prime
             memory.score += r
+
+            s = s_prime
             if done:
                 break
     env.close()
@@ -103,12 +102,17 @@ if __name__ == "__main__":
 
     print("Start.")
     for ep in range(1, K_epoch_training + 1):
-        print(f"Batch. {ep} - Collecting data...")
+        print(f"Batch. {ep}")
+        print(" - Collecting data...")
         memory_list = parallel_process(config.env_name, actor, config.num_memos, config.num_actors)
         total_score = sum([memo.score for memo in memory_list])
         print(f"Avg score : {total_score / config.num_memos:.1f}")
 
+        # print(" - Training for predictive model...")
         # learner.learn_pred_model(memory_list)
-        learner.test(memory_list[0])
+
+        print(" - Training for policy...")
+        learner.learn_policy(memory_list)
+        memory_list.clear()
 
     print("Finished.")

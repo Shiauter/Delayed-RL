@@ -55,7 +55,6 @@ class Memory:
             "states_prime", "dones",
             "timesteps", "a_lsts"
         ]
-        # , "h_ins", "h_outs"
         self.max_seq_len = max_seq_len
         self.score = 0.0
 
