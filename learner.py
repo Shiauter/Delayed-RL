@@ -40,7 +40,7 @@ class Learner:
             h_in = h_out
         return torch.stack(s_ti)
 
-    def learn_pred_model(self, memory_list: list[Memory]):
+    def learn_pred_model(self, memory_list: list[Memory], h0):
         if self.p_iters == 0: return
 
         loss_log = []
@@ -48,7 +48,7 @@ class Learner:
             total_loss = 0
             for i in range(self.num_memos):
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
-                first_hidden  = self.actor.h0
+                first_hidden = h0
 
                 target = []
                 limit = len(s) - self.actor.delay
@@ -93,15 +93,15 @@ class Learner:
             h_in = h_out
         return torch.stack(probs).gather(1,a)
 
-    def learn_policy(self, memory_list: list[Memory]):
+    def learn_policy(self, memory_list: list[Memory], h0):
         loss_log = []
         for epoch in range(self.K_epoch_policy):
             total_loss = 0
             for i in range(self.num_memos):
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
                 a, prob_a = a[self.actor.delay:], prob_a[:-self.actor.delay]
-                first_hidden  = self.actor.h0
-                second_hidden = self.actor.pred_critic(s[0], self.actor.h0)[1]
+                first_hidden  = h0
+                _, second_hidden = self.actor.pred_critic(s[0], first_hidden)
                 v_s, _ = self.actor.pred_critic(s, first_hidden)
                 v_prime, _ = self.actor.pred_critic(s_prime, second_hidden)
 

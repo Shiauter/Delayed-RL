@@ -82,7 +82,6 @@ class Actor:
     delay: int
     p_iters: int
     T_horizon: int
-    h0: tuple[torch.Tensor, torch.Tensor]
 
     def __init__(self, config: Config):
         for key, value in vars(config).items():
@@ -94,6 +93,18 @@ class Actor:
         self.policy = Policy(64, 32, self.a_size)
 
         self.dist = Categorical((self.a_size,))
+
+    def load_params(self, state_dict: list[dict]):
+        self.rnn.load_state_dict(state_dict[0])
+        self.pred_model.load_state_dict(state_dict[1])
+        self.policy.load_state_dict(state_dict[2])
+
+    def output_params(self):
+        return [
+            self.rnn.state_dict(),
+            self.pred_model.state_dict(),
+            self.policy.state_dict()
+        ]
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out, pred_s = self.pred_present(s, a_lst, h_in)

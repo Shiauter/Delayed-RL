@@ -8,13 +8,14 @@ from learner import Learner
 from util import Memory
 from config import Config
 
-
-def collect_data(env_name, model: Actor, conn):
+def collect_data(env_name, model_state, config: Config, conn):
     env = gym.make(env_name)
+    model = Actor(config)
+    model.load_params(model_state)
     memory = Memory(model.T_horizon)
 
     s, _ = env.reset()
-    h_out = model.h0
+    h_out = config.h0
     a_lst = [i % 2 for i in range(model.delay)]
     done = False
 
@@ -52,10 +53,11 @@ def collect_data(env_name, model: Actor, conn):
     conn.send(memory)
     conn.close()
 
-def parallel_process(env_name, model: Actor, num_memos, num_actors) -> list[Memory]:
+def parallel_process(config: Config, model_state) -> list[Memory]:
+    env_name, num_memos, num_actors = config.env_name, config.num_memos, config.num_actors
+
     processes = []
     parent_conns, child_conns = zip(*[mp.Pipe() for _ in range(num_memos)])
-
     aggregated_data = []
     num_batches = (num_memos + num_actors - 1) // num_actors
     for batch_idx in range(num_batches):
@@ -63,7 +65,7 @@ def parallel_process(env_name, model: Actor, num_memos, num_actors) -> list[Memo
         end = min(start + num_actors, num_memos)
 
         for i in range(start, end):
-            p = mp.Process(target=collect_data, args=(env_name, model, child_conns[i]))
+            p = mp.Process(target=collect_data, args=(env_name, model_state, config, child_conns[i]))
             processes.append(p)
             p.start()
 
@@ -88,31 +90,31 @@ if __name__ == "__main__":
             {"params": actor.rnn.parameters()},
             {"params": actor.pred_model.parameters()}
         ],
-        lr=1e-3
+        lr=config.lr_pred_model
     )
     optim_policy = optim.Adam(
         [
             {"params": actor.rnn.parameters()},
             {"params": actor.policy.parameters()}
         ],
-        lr=3e-4
+        lr=config.lr_policy
     )
     learner = Learner(actor, optim_pred_model, optim_policy, config)
-    K_epoch_training = 5
 
-    print("Start.")
-    for ep in range(1, K_epoch_training + 1):
+    print("=== Start ===")
+    for ep in range(1, config.K_epoch_training + 1):
         print(f"Batch. {ep}")
         print(" - Collecting data...")
-        memory_list = parallel_process(config.env_name, actor, config.num_memos, config.num_actors)
+        memory_list = parallel_process(config, actor.output_params())
         total_score = sum([memo.score for memo in memory_list])
         print(f"Avg score : {total_score / config.num_memos:.1f}")
 
-        # print(" - Training for predictive model...")
-        # learner.learn_pred_model(memory_list)
+        print(" - Training for predictive model...")
+        learner.learn_pred_model(memory_list, config.h0)
 
         print(" - Training for policy...")
-        learner.learn_policy(memory_list)
-        memory_list.clear()
+        learner.learn_policy(memory_list, config.h0)
 
-    print("Finished.")
+        model_state = actor.output_params()
+        learner.actor.load_params(model_state)
+    print("=== Finished ===")

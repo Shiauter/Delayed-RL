@@ -8,9 +8,12 @@ class Config:
     a_size: int = field(init=False)
     gamma: float = 0.99
     lmbda: float = 0.95
+    lr_pred_model: float = 1e-3
+    lr_policy: float = 1e-4
     eps_clip: float = 0.1
-    K_epoch_policy: int = 3
+    K_epoch_training: int = 100
     K_epoch_pred_model: int = 10
+    K_epoch_policy: int = 10
     delay: int = 4
     p_iters: int = 4
     num_memos: int = 10
