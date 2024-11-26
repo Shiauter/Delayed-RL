@@ -50,26 +50,22 @@ class Learner:
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
                 first_hidden = h0
 
-                target = []
                 limit = len(s) - self.actor.delay
-                for i in range(limit):
-                    start, end = i + 1, min(i + self.p_iters, len(s) - 1) + 1
-                    before_done = s[start : end].tolist()
-                    after_done = [s[-1] for _ in range(self.p_iters - (end - start))]
-                    target.append(before_done + after_done)
-                target = torch.tensor(target, dtype=torch.float).view(-1, self.p_iters, self.s_size)
+                idx = torch.arange(limit).unsqueeze(1) + torch.arange(1, self.p_iters + 1).unsqueeze(0)
+                idx = idx.clamp(max=len(s) - 1)
+                target = s[idx].view(-1, self.p_iters, self.s_size)
 
                 pred = self.make_pred_s_tis(s, a_lst, first_hidden, limit)
                 loss = self.actor.pred_model.criterion(pred, target)
                 total_loss += loss
             total_loss /= self.num_memos
-            print(f"> Epoch {epoch + 1}. Loss : {total_loss.item()}")
+            # print(f"> Epoch {epoch + 1}. Loss : {total_loss.item()}")
 
             self.optim_pred_model.zero_grad()
             total_loss.mean().backward()
             self.optim_pred_model.step()
             loss_log.append(total_loss)
-        print(f"Avg Loss : {torch.mean(torch.stack(loss_log))}")
+        print(f"|| Avg Loss  : {torch.mean(torch.stack(loss_log))}")
 
     def cal_advantage(self, v_s, r, v_prime, done_mask):
         td_target = r + self.gamma * v_prime * done_mask
@@ -85,13 +81,17 @@ class Learner:
         advantage = torch.tensor(advantage_lst, dtype=torch.float)
         return advantage, td_target
 
-    def make_pi_a(self, s, a, h_in, a_lst, limit):
-        probs = []
-        for i in range(limit):
-            _, pi, h_out, _ = self.actor.sample_action(s[i], a_lst[i], h_in)
-            probs.append(pi.view(-1))
-            h_in = h_out
-        return torch.stack(probs).gather(1,a)
+    # def make_pi_a(self, s, a, h_in, a_lst, limit):
+    #     probs = []
+    #     for i in range(limit):
+    #         _, pi, h_out, _ = self.actor.sample_action(s[i], a_lst[i], h_in)
+    #         probs.append(pi.view(-1))
+    #         h_in = h_out
+    #     return torch.stack(probs).gather(1,a)
+
+    def make_pi_a_by_true_s(self, s, a, h_in):
+        pi, _ = self.actor.pred_pi(s, h_in)
+        return pi.squeeze(1).gather(1,a)
 
     def learn_policy(self, memory_list: list[Memory], h0):
         loss_log = []
@@ -99,30 +99,33 @@ class Learner:
             total_loss = 0
             for i in range(self.num_memos):
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
-                a, prob_a = a[self.actor.delay:], prob_a[:-self.actor.delay]
                 first_hidden  = h0
                 _, second_hidden = self.actor.pred_critic(s[0], first_hidden)
+
                 v_s, _ = self.actor.pred_critic(s, first_hidden)
                 v_prime, _ = self.actor.pred_critic(s_prime, second_hidden)
 
                 advantage, td_target = self.cal_advantage(v_s, r, v_prime, done)
-                advantage, td_target = advantage[self.actor.delay:], td_target[self.actor.delay:]
+                # advantage, td_target = advantage[self.actor.delay:], td_target[self.actor.delay:]
 
                 # a, prob, h_out, pred_s_ti = model.sample_action(s, a_lst, h_in)
                 # using pred_s or true s
-                limit = len(s) - self.actor.delay
-                pi_a = self.make_pi_a(s, a, first_hidden, a_lst, limit)
+                # v_s, v_prime = v_s[self.actor.delay:], v_prime[self.actor.delay:]
+                # a, prob_a = a[self.actor.delay:], prob_a[:-self.actor.delay]
+                # limit = len(s) - self.actor.delay
+                # pi_a = self.make_pi_a(s, a, first_hidden, a_lst, limit)
+                pi_a = self.make_pi_a_by_true_s(s, a, first_hidden)
                 ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-                loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(v_s[self.actor.delay:], td_target)
+                loss = -torch.min(surr1, surr2) + F.smooth_l1_loss(v_s, td_target)
                 total_loss += loss.mean()
             total_loss /= self.num_memos
-            print(f"> Epoch {epoch + 1}. Loss : {total_loss.item()}")
+            # print(f"> Epoch {epoch + 1}. Loss : {total_loss.item()}")
 
             self.optim_policy.zero_grad()
             total_loss.mean().backward()
             self.optim_policy.step()
             loss_log.append(total_loss)
-        print(f"Avg Loss : {torch.mean(torch.stack(loss_log))}")
+        print(f"|| Avg Loss  : {torch.mean(torch.stack(loss_log))}")

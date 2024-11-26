@@ -101,20 +101,25 @@ if __name__ == "__main__":
     )
     learner = Learner(actor, optim_pred_model, optim_policy, config)
 
-    print("=== Start ===")
+    print("=== Start ===\n")
     for ep in range(1, config.K_epoch_training + 1):
-        print(f"Batch. {ep}")
-        print(" - Collecting data...")
+        print(f"* Epoch {ep}.")
+        print(f"> {'Collecting data...':<35}", end=" ")
         memory_list = parallel_process(config, actor.output_params())
         total_score = sum([memo.score for memo in memory_list])
-        print(f"Avg score : {total_score / config.num_memos:.1f}")
+        print(f"|| Avg score : {total_score / config.num_memos:.1f}")
 
-        print(" - Training for predictive model...")
+        print(f"> {'Training for predictive model...':<35}", end=" ")
         learner.learn_pred_model(memory_list, config.h0)
 
-        print(" - Training for policy...")
+        print(f"> {'Training for policy...':<35}", end=" ")
         learner.learn_policy(memory_list, config.h0)
 
         model_state = actor.output_params()
         learner.actor.load_params(model_state)
-    print("=== Finished ===")
+
+        saved_path = f"{config.model_dir}/epoch_{ep}_{config.model_name}"
+        torch.save(actor, saved_path)
+        print(f"> Model is saved in {saved_path}")
+        print()
+    print("=== Finished ===\n")

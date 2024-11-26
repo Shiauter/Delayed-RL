@@ -68,7 +68,7 @@ class RNN(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.fc1   = nn.Linear(input_dim, hidden_dim)
-        self.rnn = nn.LSTM(hidden_dim, out_dim)
+        self.rnn = nn.GRU(hidden_dim, out_dim)
 
     def forward(self, x, h):
         x = F.relu(self.fc1(x))
@@ -121,9 +121,9 @@ class Actor:
         h_ti = h_first
         for i in range(self.p_iters):
             pred_s = self.pred_model(pred_s, a_lst[i], o_ti)
-            s_ti.append(pred_s.view(-1))
+            s_ti.append(pred_s)
             o_ti, h_ti = self.rnn(pred_s, h_ti)
-        s_ti = torch.stack(s_ti) if len(s_ti) > 0 else torch.tensor([])
+        s_ti = torch.stack(s_ti).squeeze(1, 2) if len(s_ti) > 0 else torch.tensor([])
 
         return o_ti, h_first, s_ti
 
@@ -133,3 +133,10 @@ class Actor:
         o, h_out = self.rnn(s, h_in)
         v = self.policy.v(o).squeeze(1)
         return v, h_out
+
+    def pred_pi(self, s, h_in):
+        # predicting pi(s_{t+d}) at t
+        # s is true state here, instead of those predicted by P
+        o, h_out = self.rnn(s, h_in)
+        pi = self.policy.pi(o)
+        return pi, h_out
