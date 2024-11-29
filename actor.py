@@ -30,9 +30,12 @@ class PredictiveModel(nn.Module):
         self.criterion = nn.MSELoss()
 
     def forward(self, state, action, gru_out):
-        state = state.view(-1)
-        action = action.view(-1)
-        gru_out = gru_out.view(-1)
+        # s = (batch, s_size)
+        # a = (batch, 1)
+        # o = (batch, hidden_size)
+        # state = state.view(-1)
+        # action = action.view(-1)
+        # gru_out = gru_out.view(-1)
 
         x = torch.cat([state, action, gru_out], dim=-1)
         delta = self.D(x) # D(s, a)
@@ -43,7 +46,8 @@ class PredictiveModel(nn.Module):
         forget_weights = self.F(x) # F(s, a), in [0,1]
 
         pred_s = forget_weights * adjusted_state + (1 - forget_weights) * new_state
-        return pred_s.view(-1, 1, self.out_dim)
+        # return pred_s.view(-1, 1, self.out_dim)
+        return pred_s
 
 class Policy(nn.Module):
     def __init__(self, input_dim, hidden_dim, out_dim):
@@ -72,7 +76,7 @@ class RNN(nn.Module):
 
     def forward(self, x, h):
         x = F.relu(self.fc1(x))
-        x = x.view(-1, 1, self.hidden_dim)
+        # x = x.view(-1, 1, self.hidden_dim)
         out, hidden = self.rnn(x, h)
         return out, hidden
 
@@ -82,6 +86,7 @@ class Actor:
     delay: int
     p_iters: int
     T_horizon: int
+    hidden_size: int
 
     def __init__(self, config: Config):
         for key, value in vars(config).items():
@@ -107,36 +112,79 @@ class Actor:
         ]
 
     def sample_action(self, s, a_lst, h_in):
-        o, h_out, pred_s = self.pred_present(s, a_lst, h_in)
+        o, h_out, pred_s = self.pred_present(s, a_lst, h_in, self.p_iters)
+        # o and h has same shape is weird
         pi = self.policy.pi(o)
         self.dist.set_probs(pi)
         action = self.dist.sample()
         return action.item(), pi, h_out, pred_s
 
-    def pred_present(self, s, a_lst, h_in):
-        o_ti, h_first = self.rnn(s, h_in)
+    def pred_present(self, s, a_lst, h_in, iters):
+        # generate all starting h_in
+        # (seq_len, batch=1, data_dim)
+        o, _ = self.rnn(s, h_in)
+        o = torch.cat([h_in, o[:-1]])
 
+        # generate s_ti for all s
+        # (seq_len=1, batch, data_dim)
         s_ti = []
-        pred_s = s
-        h_ti = h_first
-        for i in range(self.p_iters):
-            pred_s = self.pred_model(pred_s, a_lst[i], o_ti)
+        pred_s = s.transpose(0, 1)
+        all_h_in = o.transpose(0, 1)
+
+        o_ti, h_ti = self.rnn(pred_s, all_h_in)
+        h_first = h_ti
+        for i in range(iters):
+            pred_s = self.pred_model(pred_s, a_lst[:, :, i].unsqueeze(-1), o_ti)
             s_ti.append(pred_s)
             o_ti, h_ti = self.rnn(pred_s, h_ti)
-        s_ti = torch.stack(s_ti).squeeze(1, 2) if len(s_ti) > 0 else torch.tensor([])
-
+        s_ti = torch.cat(s_ti) if len(s_ti) > 0 else torch.tensor([])
         return o_ti, h_first, s_ti
 
+    def pred_prob(self, s, a_lst, h_in):
+        o, h_out, _ = self.pred_present(s, a_lst, h_in, self.p_iters)
+        pi = self.policy.pi(o)
+        return pi, h_out[:, 0].unsqueeze(0)
+
     def pred_critic(self, s, h_in):
+        o, _ = self.rnn(s, h_in)
+        v = self.policy.v(o)
+        return v
+
+    def pred_prob_and_critic(self, s, s_offset, h_in):
+        o, _ = self.rnn(s, h_in)
+        second_hidden = o[0].unsqueeze(0)
+        o = o[self.delay:]
+        pi = self.policy.pi(o)
+        v = self.policy.v(o)
+        return pi, v, second_hidden
+
+    def pred_prob_and_critic_batch(self, s, s_offset, h_in):
+        # generate all starting h_in
+        # (seq_len, batch, data_dim)
+        o, _ = self.rnn(s, h_in)
+        second_hidden = o[0].unsqueeze(0)
+        o = torch.cat([h_in, o[:-1]])
+
+        # generate o for all s_offset
+        # (seq_len, batch, data_dim)
+        all_h_in = o.transpose(0, 1)
+
+        o, _ = self.rnn(s_offset, all_h_in)
+        h_first = o[0]
+        last_o = o[-1]
+        pi = self.policy.pi(last_o)
+        v = self.policy.v(last_o)
+        return pi, v, h_first, second_hidden
+
+    def pred_prob_and_critic_old(self, s, h_in):
         # predicting v(s_{t+d}) at t
         # s is true state here, instead of those predicted by P
-        o, h_out = self.rnn(s, h_in)
-        v = self.policy.v(o).squeeze(1)
-        return v, h_out
-
-    def pred_pi(self, s, h_in):
-        # predicting pi(s_{t+d}) at t
-        # s is true state here, instead of those predicted by P
-        o, h_out = self.rnn(s, h_in)
-        pi = self.policy.pi(o)
-        return pi, h_out
+        h_first = None
+        for i in range(len(s)):
+            o_ti, h_out = self.rnn(s[i], h_in)
+            h_in = h_out
+            if h_first is None:
+                h_first = h_out
+        pi = self.policy.pi(o_ti)
+        v = self.policy.v(o_ti)
+        return pi, v, h_first

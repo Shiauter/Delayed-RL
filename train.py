@@ -23,8 +23,13 @@ def collect_data(env_name, model_state, config: Config, conn):
         for t in range(model.T_horizon):
             h_in = h_out
             a, prob, h_out, _ = model.sample_action(
-                torch.from_numpy(s), torch.tensor(a_lst), h_in
-                )
+                torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
+                torch.tensor(a_lst).view(1, 1, -1),
+                h_in
+            )
+            # a, prob, h_out, _ = model.sample_action(
+            #     torch.from_numpy(s), torch.tensor(a_lst), h_in
+            #     )
             prob = prob.view(-1)
             a_lst.append(a)
 
@@ -35,10 +40,10 @@ def collect_data(env_name, model_state, config: Config, conn):
             exp = {
                 "states": torch.from_numpy(s).detach(),
                 "actions": torch.tensor(delay_a).detach().view(-1),
-                "probs": prob[delay_a].detach().view(-1),
+                "probs": prob[a].detach().view(-1),
                 "rewards": torch.tensor(r / 100.0).detach().view(-1),
                 "states_prime": torch.from_numpy(s_prime).detach(),
-                "dones": torch.tensor(0.0 if done else 1.0).detach().view(-1),
+                "dones": torch.tensor(0 if done else 1).detach().view(-1),
                 "timesteps": torch.tensor(t).detach().view(-1),
                 "a_lsts": torch.tensor(a_lst).detach().view(-1)
             }
@@ -107,19 +112,20 @@ if __name__ == "__main__":
         print(f"> {'Collecting data...':<35}", end=" ")
         memory_list = parallel_process(config, actor.output_params())
         total_score = sum([memo.score for memo in memory_list])
-        print(f"|| Avg score : {total_score / config.num_memos:.1f}")
-
-        print(f"> {'Training for predictive model...':<35}", end=" ")
-        learner.learn_pred_model(memory_list, config.h0)
+        score_mean = total_score / config.num_memos
+        print(f"|| Avg score : {score_mean:.1f}")
 
         print(f"> {'Training for policy...':<35}", end=" ")
-        learner.learn_policy(memory_list, config.h0)
+        ppo_loss = learner.learn_policy(memory_list, config.h0)
 
-        model_state = actor.output_params()
-        learner.actor.load_params(model_state)
+        print(f"> {'Training for predictive model...':<35}", end=" ")
+        pred_model_loss = learner.learn_pred_model(memory_list, config.h0)
 
-        saved_path = f"{config.model_dir}/epoch_{ep}_{config.model_name}"
-        torch.save(actor, saved_path)
-        print(f"> Model is saved in {saved_path}")
+        # model_state = actor.output_params()
+        # learner.actor.load_params(model_state)
+
+        # saved_path = f"{config.model_dir}/epoch_{ep}_{config.model_name}"
+        # torch.save(actor, saved_path)
+        # print(f"> Model is saved in {saved_path}")
         print()
     print("=== Finished ===\n")
