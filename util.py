@@ -73,3 +73,12 @@ class Memory:
 
     def get_current_size(self):
         return len(next(iter(self.exps.values()), []))
+
+def merge_dict(*dicts):
+    result = {}
+    for d in dicts:
+        for key, value in d.items():
+            if key in result:
+                raise KeyError(f"Duplicate key found: {key}")
+            result[key] = value
+    return result

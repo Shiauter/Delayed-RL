@@ -2,10 +2,11 @@ import gymnasium as gym
 import torch
 import torch.optim as optim
 import torch.multiprocessing as mp
+from torch.utils.tensorboard import SummaryWriter
 
 from actor import Actor
 from learner import Learner
-from util import Memory
+from util import Memory, merge_dict
 from config import Config
 
 def collect_data(env_name, model_state, config: Config, conn):
@@ -15,7 +16,7 @@ def collect_data(env_name, model_state, config: Config, conn):
     memory = Memory(model.T_horizon)
 
     s, _ = env.reset()
-    h_out = config.h0
+    h_out = torch.zeros(config.h0).float()
     a_lst = [i % 2 for i in range(model.delay)]
     done = False
 
@@ -100,11 +101,15 @@ if __name__ == "__main__":
     optim_policy = optim.Adam(
         [
             {"params": actor.rnn.parameters()},
-            {"params": actor.policy.parameters()}
+            {"params": actor.policy.parameters()},
+            # {"params": actor.pred_model.parameters()}
         ],
         lr=config.lr_policy
     )
     learner = Learner(actor, optim_pred_model, optim_policy, config)
+    writer = SummaryWriter(f"{config.log_root}/{config.experiment_name}")
+    config_text = config.get_json()
+    writer.add_text('Configuration', config_text)
 
     print("=== Start ===\n")
     for ep in range(1, config.K_epoch_training + 1):
@@ -115,17 +120,28 @@ if __name__ == "__main__":
         score_mean = total_score / config.num_memos
         print(f"|| Avg score : {score_mean:.1f}")
 
-        print(f"> {'Training for policy...':<35}", end=" ")
-        ppo_loss = learner.learn_policy(memory_list, config.h0)
-
         print(f"> {'Training for predictive model...':<35}", end=" ")
-        pred_model_loss = learner.learn_pred_model(memory_list, config.h0)
+        pred_model_log, avg_loss = learner.learn_pred_model(memory_list)
+        print(f"|| Avg Loss  : {avg_loss}")
 
-        # model_state = actor.output_params()
-        # learner.actor.load_params(model_state)
+        print(f"> {'Training for policy...':<35}", end=" ")
+        ppo_log, avg_loss = learner.learn_policy(memory_list)
+        print(f"|| Avg Loss  : {avg_loss}")
 
-        # saved_path = f"{config.model_dir}/epoch_{ep}_{config.model_name}"
-        # torch.save(actor, saved_path)
-        # print(f"> Model is saved in {saved_path}")
+        model_state = actor.output_params()
+        learner.actor.load_params(model_state)
+
+        saved_path = f"{config.model_root}/{config.experiment_name}/epoch_{ep}_{config.model_name}"
+        torch.save(actor, saved_path)
+        print(f"> Model is saved in {saved_path}")
+
+        try:
+            log = merge_dict(pred_model_log, ppo_log)
+            log["score"] = score_mean
+            for k, v in log.items():
+                writer.add_scalar(k, v, ep)
+        except KeyError as e:
+            print(f"Error: {e}")
         print()
     print("=== Finished ===\n")
+    writer.close()

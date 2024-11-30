@@ -150,7 +150,7 @@ class Actor:
         v = self.policy.v(o)
         return v
 
-    def pred_prob_and_critic(self, s, s_offset, h_in):
+    def pred_prob_and_critic(self, s, h_in):
         o, _ = self.rnn(s, h_in)
         second_hidden = o[0].unsqueeze(0)
         o = o[self.delay:]
