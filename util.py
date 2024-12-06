@@ -1,5 +1,6 @@
 import torch
 from torch.distributions.utils import probs_to_logits
+import os, sys, shutil
 
 class Categorical:
     def __init__(self, probs_shape):
@@ -82,3 +83,22 @@ def merge_dict(*dicts):
                 raise KeyError(f"Duplicate key found: {key}")
             result[key] = value
     return result
+
+def check_dir_exist(log_dir: str, saved_folder: str):
+    if os.path.exists(log_dir):
+        try:
+            user_input = input(
+                "> Found existing log directory. \n" + \
+                "> Clear and continue？ (y/[n]): "
+            ).strip().lower()
+            if user_input == 'y':
+                shutil.rmtree(log_dir)
+                print("> Log directory is cleared.")
+            else:
+                raise SystemExit("> The program has stopped.")
+        except SystemExit as e:
+            print(e)
+            sys.exit()
+
+    if not os.path.exists(saved_folder):
+        os.makedirs(saved_folder)

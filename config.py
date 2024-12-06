@@ -1,12 +1,12 @@
 from dataclasses import dataclass, field, asdict
-import torch, gym
+import gym
 import json
 
 @dataclass
 class Config:
     env_name: str
     model_root: str = "./models"
-    experiment_name = "speed_optimized"
+    experiment_name = "fixing_small_critic_loss"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
     s_size: int = field(init=False)

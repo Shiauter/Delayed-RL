@@ -115,6 +115,7 @@ class Learner:
         pi, v, second_hidden = self.actor.pred_prob_and_critic(
             s.unsqueeze(1), h_in
         )
+        pi, v = pi[self.delay:], v[self.delay:]
         return pi.squeeze(1), v.squeeze(1), second_hidden
 
     def make_pi_and_critic_by_sample(self, s, a_lst, h_in):
@@ -153,7 +154,7 @@ class Learner:
                 # _, _, second_hidden = self.actor.rnn(s[0].unsqueeze(1), first_hidden)
                 # print(second_hidden.shape)
 
-                advantage, td_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
+                advantage, td_target = self.cal_advantage(v_s, r[:-self.delay], v_prime, done[self.delay:])
                 # advantage, td_target = advantage[self.actor.delay:], td_target[self.actor.delay:]
 
                 # using pred_s or true s
@@ -172,6 +173,7 @@ class Learner:
 
                 entropy = -(pi_a * torch.log(pi_a)).sum(dim=-1).mean()
                 entropy_bonus = self.entropy_weight * entropy
+                # what if low entropy but bad action
 
                 loss = policy_loss + critic_loss - entropy_bonus
                 ppo_loss += loss.mean()
