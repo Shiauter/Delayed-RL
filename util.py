@@ -57,6 +57,8 @@ class Memory:
             "timesteps", "a_lsts"
         ]
         self.max_seq_len = max_seq_len
+        self.h0 = None
+        self.h1 = None
         self.score = 0.0
 
         # used when copying other memory
@@ -68,6 +70,12 @@ class Memory:
                 self.exps[key].append(value)
             else:
                 raise KeyError(f"Invalid key '{key}' provided to store.")
+
+    def set_hidden(self, h):
+        if self.h0 is None:
+            self.h0 = h
+        elif self.h1 is None:
+            self.h1 = h
 
     def init_exps(self):
         self.exps = {key: [] for key in self.keys}

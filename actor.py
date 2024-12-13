@@ -50,20 +50,17 @@ class PredictiveModel(nn.Module):
         return pred_s
 
 class Policy(nn.Module):
-    def __init__(self, input_dim, hidden_dim, out_dim):
+    def __init__(self, input_dim, out_dim):
         super().__init__()
-        self.fc1   = nn.Linear(input_dim, hidden_dim)
-        self.fc_pi = nn.Linear(hidden_dim, out_dim)
-        self.fc_v  = nn.Linear(hidden_dim, 1)
+        self.fc_pi = nn.Linear(input_dim, out_dim)
+        self.fc_v  = nn.Linear(input_dim, 1)
 
     def pi(self, x):
-        x = F.relu(self.fc1(x))
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
     def v(self, x):
-        x = F.relu(self.fc1(x))
         v = self.fc_v(x)
         return v
 
@@ -93,9 +90,9 @@ class Actor:
             if key in self.__annotations__:
                 setattr(self, key, value)
 
-        self.rnn = RNN(self.s_size, 128, 64)
-        self.pred_model = PredictiveModel(self.s_size, 1, 64, self.s_size)
-        self.policy = Policy(64, 32, self.a_size)
+        self.rnn = RNN(self.s_size, 64, self.hidden_size)
+        self.pred_model = PredictiveModel(self.s_size, 1, self.hidden_size, self.s_size)
+        self.policy = Policy(self.hidden_size, self.a_size)
 
         self.dist = Categorical((self.a_size,))
 
@@ -120,7 +117,7 @@ class Actor:
         return action.item(), pi, h_out, pred_s
 
     def pred_present(self, s, a_lst, h_in, iters):
-        # generate all starting h_in
+        # generate h_in for all s
         # (seq_len, batch=1, data_dim)
         o, _ = self.rnn(s, h_in)
         o = torch.cat([h_in, o[:-1]])
@@ -128,10 +125,9 @@ class Actor:
         # generate s_ti for all s
         # (seq_len=1, batch, data_dim)
         s_ti = []
-        pred_s = s.transpose(0, 1)
-        all_h_in = o.transpose(0, 1)
+        pred_s, h_in = s.transpose(0, 1), o.transpose(0, 1)
 
-        o_ti, h_ti = self.rnn(pred_s, all_h_in)
+        o_ti, h_ti = self.rnn(pred_s, h_in)
         h_first = h_ti
         for i in range(iters):
             pred_s = self.pred_model(pred_s, a_lst[:, :, i].unsqueeze(-1), o_ti)
@@ -140,22 +136,22 @@ class Actor:
         s_ti = torch.cat(s_ti) if len(s_ti) > 0 else torch.tensor([])
         return o_ti, h_first, s_ti
 
-    def pred_prob(self, s, a_lst, h_in):
-        o, h_out, _ = self.pred_present(s, a_lst, h_in, self.p_iters)
-        pi = self.policy.pi(o)
-        return pi, h_out[:, 0].unsqueeze(0)
+    # def pred_prob(self, s, a_lst, h_in):
+    #     o, h_out, _ = self.pred_present(s, a_lst, h_in, self.p_iters)
+    #     pi = self.policy.pi(o)
+    #     return pi, h_out[:, 0].unsqueeze(0)
 
-    def pred_critic(self, s, h_in):
-        o, _ = self.rnn(s, h_in)
-        v = self.policy.v(o)
-        return v
+    # def pred_critic(self, s, h_in):
+    #     o, _ = self.rnn(s, h_in)
+    #     v = self.policy.v(o)
+    #     return v
 
     def pred_prob_and_critic(self, s, h_in):
         o, _ = self.rnn(s, h_in)
         second_hidden = o[0].unsqueeze(0)
         pi = self.policy.pi(o)
         v = self.policy.v(o)
-        return pi, v, second_hidden
+        return pi, v, second_hidden.detach()
 
     def pred_prob_and_critic_batch(self, s, s_offset, h_in):
         # generate all starting h_in
