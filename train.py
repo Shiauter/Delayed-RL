@@ -1,62 +1,119 @@
 import gymnasium as gym
+from gymnasium.wrappers import RecordVideo
 import torch
 import torch.optim as optim
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
 from actor import Actor
 from learner import Learner
 from util import Memory, merge_dict, check_dir_exist
 from config import Config
 
-def collect_data(env_name, model_state, config: Config, conn):
-    try:
-        env = gym.make(env_name)
+
+def recording_eval(env_name, model_state, record_dir:str, epoch:int):
+    with torch.no_grad():
+        env = gym.make(env_name, render_mode="rgb_array")
         model = Actor(config)
         model.load_params(model_state)
-        memory = Memory(model.T_horizon)
 
         s, _ = env.reset()
         h_out = torch.zeros(config.h0).float()
-        a_lst = [i % 2 for i in range(model.delay)]
+        a_lst = [i % 2 for i in range(config.delay)]
         done = False
+        frames = []
 
         while not done:
-            for t in range(model.T_horizon):
-                h_in = h_out
-                a, prob, h_out, _ = model.sample_action(
-                    torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
-                    torch.tensor(a_lst).view(1, 1, -1),
-                    h_in
-                )
-                # a, prob, h_out, _ = model.sample_action(
-                #     torch.from_numpy(s), torch.tensor(a_lst), h_in
-                #     )
-                prob = prob.view(-1)
-                a_lst.append(a)
+            h_in = h_out
+            a, _, h_out, _ = model.sample_action(
+                torch.from_numpy(s).view(1, 1, -1),
+                torch.tensor(a_lst).view(1, 1, -1),
+                h_in
+            )
 
-                delay_a = a_lst.pop(0)
-                s_prime, r, terminated, truncated, _ = env.step(delay_a)
-                done = terminated or truncated
+            a = a.item()
+            a_lst.append(a)
 
-                exp = {
-                    "states": torch.from_numpy(s).detach(),
-                    "actions": torch.tensor(delay_a).detach().view(-1),
-                    "probs": prob[a].detach().view(-1),
-                    "rewards": torch.tensor(r / 100.0).detach().view(-1),
-                    "states_prime": torch.from_numpy(s_prime).detach(),
-                    "dones": torch.tensor(0 if done else 1).detach().view(-1),
-                    "timesteps": torch.tensor(t).detach().view(-1),
-                    "a_lsts": torch.tensor(a_lst).detach().view(-1)
-                }
-                memory.store(**exp)
-                memory.set_hidden(h_in.detach())
-                memory.score += r
+            delay_a = a_lst.pop(0)
+            s_prime, r, terminated, truncated, _ = env.step(delay_a)
+            done = terminated or truncated
+            frame = env.render()
+            frames.append(frame)
 
-                s = s_prime
-                if done:
-                    break
-        conn.send(memory)
+            s = s_prime
+            if done:
+                break
+        record_path = f"{record_dir}/epoch_{epoch}.mp4"
+        clip = ImageSequenceClip(frames, fps=30)
+        clip.write_videofile(
+            record_path,
+            codec="libx264",
+            logger=None
+        )
+        env.close()
+        return record_path
+
+def collect_data(env_name, model_state, config: Config, conn):
+    try:
+        with torch.no_grad():
+            env = gym.make(env_name)
+            model = Actor(config)
+            model.load_params(model_state)
+            memory = Memory(config.T_horizon)
+
+            s, _ = env.reset()
+            h_out = torch.zeros(config.h0).float()
+            a_lst = [i % 2 for i in range(config.delay)]
+            done = False
+
+            while not done:
+                for t in range(model.T_horizon):
+                    h_in = h_out
+                    a, prob, h_out, _ = model.sample_action(
+                        torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
+                        torch.tensor(a_lst).view(1, 1, -1),
+                        h_in
+                    )
+                    # a, prob, h_out, _ = model.sample_action(
+                    #     torch.from_numpy(s), torch.tensor(a_lst), h_in
+                    #     )
+                    prob = prob.view(-1)
+                    a = a.item()
+                    a_lst.append(a)
+
+                    delay_a = a_lst.pop(0)
+                    s_prime, r, terminated, truncated, _ = env.step(delay_a)
+                    done = terminated or truncated
+
+                    # exp = {
+                    #     "states": torch.from_numpy(s).detach(),
+                    #     "actions": torch.tensor(delay_a).detach().view(-1),
+                    #     "probs": prob[a].detach().view(-1),
+                    #     "rewards": torch.tensor(r / 100.0).detach().view(-1),
+                    #     "states_prime": torch.from_numpy(s_prime).detach(),
+                    #     "dones": torch.tensor(0 if done else 1).detach().view(-1),
+                    #     "timesteps": torch.tensor(t).detach().view(-1),
+                    #     "a_lsts": torch.tensor(a_lst).detach().view(-1)
+                    # }
+                    exp = {
+                        "states": s.tolist(),
+                        "actions": [delay_a],
+                        "probs": [prob[a].item()],
+                        "rewards": [r / 100.0],
+                        "states_prime": s_prime.tolist(),
+                        "dones": [0 if done else 1],
+                        "timesteps": [t],
+                        "a_lsts": a_lst
+                    }
+                    memory.store(**exp)
+                    memory.set_hidden(h_in.detach())
+                    memory.score += r
+
+                    s = s_prime
+                    if done:
+                        break
+            conn.send(memory)
     finally:
         env.close()
         conn.close()
@@ -112,11 +169,14 @@ if __name__ == "__main__":
     )
     learner = Learner(actor, optim_pred_model, optim_policy, config)
 
-    do_save = False
+
+    print()
+    print(f"* Experiment: {config.experiment_name}\n")
+
+    do_save = True
     if do_save:
-        log_dir = f"{config.log_root}/{config.experiment_name}"
-        saved_folder = f"{config.model_root}/{config.experiment_name}"
-        check_dir_exist(log_dir, saved_folder)
+        log_dir, saved_folder, record_dir = config.log_dir, config.saved_folder, config.record_dir
+        check_dir_exist(log_dir, saved_folder, record_dir)
 
         writer = SummaryWriter(log_dir)
         config_text = config.get_json()
@@ -144,9 +204,15 @@ if __name__ == "__main__":
         learner.actor.load_params(model_state)
 
         if do_save:
+            print("-" * 65)
+            do_record = ep % config.record_interval == 0 and do_save
+            if do_record:
+                record_path = recording_eval(config.env_name, model_state, record_dir, ep)
+                print(f"> Recording is saved in \"{record_path}\"")
+
             saved_path = f"{saved_folder}/epoch_{ep}_{config.model_name}"
             torch.save(actor, saved_path)
-            print(f"> Model is saved in {saved_path}")
+            print(f"> Model is saved in \"{saved_path}\"")
 
             try:
                 log = merge_dict(pred_model_log, ppo_log)

@@ -1,14 +1,20 @@
 from dataclasses import dataclass, field, asdict
 import gym
 import json
+import torch
 
 @dataclass
 class Config:
     env_name: str
     model_root: str = "./models"
-    experiment_name = "test_pure_ppo_comparison"
+    experiment_name = "debugging"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
+    log_dir = f"{log_root}/{experiment_name}"
+    saved_folder = f"{model_root}/{experiment_name}"
+    record_dir =f"{saved_folder}/records"
+    record_interval: int = 10 # every n epoch
+
     s_size: int = field(init=False)
     a_size: int = field(init=False)
     gamma: float = 0.99
@@ -18,15 +24,17 @@ class Config:
     lr_pred_model: float = 3e-4
     lr_policy: float = 3e-4
     eps_clip: float = 0.2
-    K_epoch_training: int = 250
+    K_epoch_training: int = 5
     K_epoch_pred_model: int = 10
     K_epoch_policy: int = 3
     delay: int = 4
     p_iters: int = delay
-    num_actors: int = 4
-    num_memos: int = 4
+    num_actors: int = 5
+    num_memos: int = 10
     T_horizon: int = 500
     hidden_size: int = 32
+    batch_size: int = 50 # for predicting s_ti
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     h0: list = field(init=False)
 
     def __post_init__(self):

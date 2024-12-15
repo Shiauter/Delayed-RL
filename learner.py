@@ -1,6 +1,8 @@
 
 import torch
 import torch.nn.functional as F
+from torch.distributions import Categorical
+
 from actor import Actor
 from util import Memory
 from config import Config
@@ -34,7 +36,7 @@ class Learner:
 
     def make_batch(self, memory: Memory):
         s, a, prob_a, r, s_prime, done, t, a_lst = \
-            map(lambda key: torch.stack(memory.exps[key]), memory.keys)
+            map(lambda key: torch.tensor(memory.exps[key]), memory.keys)
         return s, a, r, s_prime, done, prob_a, a_lst
 
     def make_pred_s_tis(self, s, a_lsts, h_in, limit):
@@ -113,12 +115,15 @@ class Learner:
     #     pi, _ = self.actor.pred_pi(s, h_in)
     #     return pi.squeeze(1).gather(1,a)
 
-    def make_pi_and_critic(self, s, h_in):
+    def make_pi_and_critic(self, s, a_lst, h_in):
+        s, a_lst = s.unsqueeze(1), a_lst.unsqueeze(0)
         pi, v, second_hidden = self.actor.pred_prob_and_critic(
-            s.unsqueeze(1), h_in
+            s, h_in
         )
-        pi, v = pi[self.delay:], v[self.delay:]
-        return pi.squeeze(1), v.squeeze(1), second_hidden
+        # _, pi, _, _ = self.actor.sample_action(s, a_lst, h_in)
+        # print(pi.shape, v.shape)
+        pi, v = pi.squeeze(1)[self.delay:], v[self.delay:].squeeze(1)
+        return pi, v, second_hidden
 
     # def make_pi_and_critic_by_sample(self, s, a_lst, h_in):
     #     o, h_out, pred_s = self.actor.pred_present(s.unsqueeze(1), a_lst.unsqueeze(0), h_in, self.p_iters)
@@ -146,18 +151,18 @@ class Learner:
 
                 # pi, v_s, second_hidden = self.make_pi_and_critic_by_sample(s[:-self.delay], a_lst[:-self.delay], first_hidden)
                 # s_offset = self.make_offset_seq(s, (0, self.delay + 1), len(s) - self.delay).transpose(0, 1)
-                pi, v_s, second_hidden = self.make_pi_and_critic(s, first_hidden)
+                pi, v_s, second_hidden = self.make_pi_and_critic(s, a_lst, first_hidden)
                 # pi, v_s, second_hidden= self.make_pi_and_critic(s[:-self.delay], a_lst[:-self.delay], first_hidden)
 
                 # _, v_prime, _ = self.make_pi_and_critic_by_sample(s_prime[:-self.delay], a_lst[1:-self.delay + 1], second_hidden)
                 # s_prime_offset = self.make_offset_seq(s_prime, (0, self.delay + 1), len(s_prime) - self.delay).transpose(0, 1)
-                _ , v_prime, _ = self.make_pi_and_critic(s_prime, second_hidden)
+                _ , v_prime, _ = self.make_pi_and_critic(s_prime, a_lst, second_hidden)
                 # _ , v_prime, _ = self.make_pi_and_critic(s_prime[:-self.delay], a_lst[:-self.delay]+1, second_hidden)
 
                 # _, _, second_hidden = self.actor.rnn(s[0].unsqueeze(1), first_hidden)
                 # print(second_hidden.shape)
 
-                advantage, return_target = self.cal_advantage(v_s, r[:len(r) - self.delay], v_prime, done[self.delay:])
+                advantage, return_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
                 # advantage, td_target = advantage[self.actor.delay:], td_target[self.actor.delay:]
 
                 # using pred_s or true s
@@ -176,8 +181,9 @@ class Learner:
 
                 # prob or prob_a?
                 # entropy = -(pi_a * torch.log(pi_a)).sum(dim=0)
-                self.actor.dist.set_probs(pi)
-                entropy = self.actor.dist.entropy().mean()
+                # self.actor.dist.set_probs(pi)
+                # entropy = self.actor.dist.entropy().mean()
+                entropy = Categorical(pi).entropy().mean()
                 entropy_bonus = self.entropy_weight * entropy
 
                 loss = - policy_loss + critic_loss - entropy_bonus

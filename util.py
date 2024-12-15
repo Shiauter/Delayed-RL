@@ -92,21 +92,30 @@ def merge_dict(*dicts):
             result[key] = value
     return result
 
-def check_dir_exist(log_dir: str, saved_folder: str):
+def check_dir_exist(log_dir: str, saved_folder: str, record_dir: str):
     if os.path.exists(log_dir):
-        try:
-            user_input = input(
-                "> Found existing log directory. \n" + \
-                "> Clear and continue？ (y/[n]): "
-            ).strip().lower()
-            if user_input == 'y':
-                shutil.rmtree(log_dir)
-                print("> Log directory is cleared.")
-            else:
-                raise SystemExit("> The program has stopped.")
-        except SystemExit as e:
-            print(e)
-            sys.exit()
+        clear_dir(log_dir)
 
     if not os.path.exists(saved_folder):
         os.makedirs(saved_folder)
+
+    if not os.path.exists(record_dir):
+        os.makedirs(record_dir)
+    else:
+        clear_dir(record_dir)
+
+def clear_dir(dir: str):
+    try:
+        user_input = input(
+            f"> Found existing directory - \"{dir}\" \n" + \
+            "> Clear and continue？ (y/[n]): "
+        ).strip().lower()
+        if user_input == 'y':
+            shutil.rmtree(dir)
+            print("> Directory is cleared.")
+            os.makedirs(dir)
+        else:
+            raise SystemExit("> The program has stopped.")
+    except SystemExit as e:
+        print(e)
+        sys.exit()

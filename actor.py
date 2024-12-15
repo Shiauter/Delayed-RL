@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Categorical
 
-from util import Categorical
+# from util import Categorical
 from config import Config
 
 class PredictiveModel(nn.Module):
@@ -84,6 +85,7 @@ class Actor:
     p_iters: int
     T_horizon: int
     hidden_size: int
+    batch_size: int
 
     def __init__(self, config: Config):
         for key, value in vars(config).items():
@@ -93,8 +95,6 @@ class Actor:
         self.rnn = RNN(self.s_size, 64, self.hidden_size)
         self.pred_model = PredictiveModel(self.s_size, 1, self.hidden_size, self.s_size)
         self.policy = Policy(self.hidden_size, self.a_size)
-
-        self.dist = Categorical((self.a_size,))
 
     def load_params(self, state_dict: list[dict]):
         self.rnn.load_state_dict(state_dict[0])
@@ -110,13 +110,11 @@ class Actor:
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out, pred_s = self.pred_present(s, a_lst, h_in, self.p_iters)
-        # o and h has same shape is weird
         pi = self.policy.pi(o)
-        self.dist.set_probs(pi)
-        action = self.dist.sample()
-        return action.item(), pi, h_out, pred_s
+        action = Categorical(pi).sample()
+        return action, pi, h_out, pred_s
 
-    def pred_present(self, s, a_lst, h_in, iters):
+    def pred_present(self, s, a, h_in, iters):
         # generate h_in for all s
         # (seq_len, batch=1, data_dim)
         o, _ = self.rnn(s, h_in)
@@ -125,15 +123,23 @@ class Actor:
         # generate s_ti for all s
         # (seq_len=1, batch, data_dim)
         s_ti = []
-        pred_s, h_in = s.transpose(0, 1), o.transpose(0, 1)
+        s, h = s.transpose(0, 1), o.transpose(0, 1)
+        s, h, a = torch.split(s, self.batch_size, dim=1), \
+                      torch.split(h, self.batch_size, dim=1), \
+                      torch.split(a, self.batch_size, dim=1)
 
-        o_ti, h_ti = self.rnn(pred_s, h_in)
-        h_first = h_ti
-        for i in range(iters):
-            pred_s = self.pred_model(pred_s, a_lst[:, :, i].unsqueeze(-1), o_ti)
-            s_ti.append(pred_s)
-            o_ti, h_ti = self.rnn(pred_s, h_ti)
-        s_ti = torch.cat(s_ti) if len(s_ti) > 0 else torch.tensor([])
+        for pred_s, h_in, a_lst in zip(s, h, a):
+            mini_s_ti = []
+            a_lst = torch.split(a_lst, 1, dim=-1)
+            o_ti, h_ti = self.rnn(pred_s, h_in)
+            h_first = h_ti
+            for i in range(iters):
+                pred_s = self.pred_model(pred_s, a_lst[i], o_ti)
+                mini_s_ti.append(pred_s)
+                o_ti, h_ti = self.rnn(pred_s, h_ti)
+            mini_s_ti = torch.cat(mini_s_ti) if len(mini_s_ti) > 0 else torch.tensor([])
+            s_ti.append(mini_s_ti)
+        s_ti = torch.cat(s_ti, dim=1)
         return o_ti, h_first, s_ti
 
     # def pred_prob(self, s, a_lst, h_in):
@@ -153,33 +159,33 @@ class Actor:
         v = self.policy.v(o)
         return pi, v, second_hidden.detach()
 
-    def pred_prob_and_critic_batch(self, s, s_offset, h_in):
-        # generate all starting h_in
-        # (seq_len, batch, data_dim)
-        o, _ = self.rnn(s, h_in)
-        second_hidden = o[0].unsqueeze(0)
-        o = torch.cat([h_in, o[:-1]])
+    # def pred_prob_and_critic_batch(self, s, s_offset, h_in):
+    #     # generate all starting h_in
+    #     # (seq_len, batch, data_dim)
+    #     o, _ = self.rnn(s, h_in)
+    #     second_hidden = o[0].unsqueeze(0)
+    #     o = torch.cat([h_in, o[:-1]])
 
-        # generate o for all s_offset
-        # (seq_len, batch, data_dim)
-        all_h_in = o.transpose(0, 1)
+    #     # generate o for all s_offset
+    #     # (seq_len, batch, data_dim)
+    #     all_h_in = o.transpose(0, 1)
 
-        o, _ = self.rnn(s_offset, all_h_in)
-        h_first = o[0]
-        last_o = o[-1]
-        pi = self.policy.pi(last_o)
-        v = self.policy.v(last_o)
-        return pi, v, h_first, second_hidden
+    #     o, _ = self.rnn(s_offset, all_h_in)
+    #     h_first = o[0]
+    #     last_o = o[-1]
+    #     pi = self.policy.pi(last_o)
+    #     v = self.policy.v(last_o)
+    #     return pi, v, h_first, second_hidden
 
-    def pred_prob_and_critic_old(self, s, h_in):
-        # predicting v(s_{t+d}) at t
-        # s is true state here, instead of those predicted by P
-        h_first = None
-        for i in range(len(s)):
-            o_ti, h_out = self.rnn(s[i], h_in)
-            h_in = h_out
-            if h_first is None:
-                h_first = h_out
-        pi = self.policy.pi(o_ti)
-        v = self.policy.v(o_ti)
-        return pi, v, h_first
+    # def pred_prob_and_critic_old(self, s, h_in):
+    #     # predicting v(s_{t+d}) at t
+    #     # s is true state here, instead of those predicted by P
+    #     h_first = None
+    #     for i in range(len(s)):
+    #         o_ti, h_out = self.rnn(s[i], h_in)
+    #         h_in = h_out
+    #         if h_first is None:
+    #             h_first = h_out
+    #     pi = self.policy.pi(o_ti)
+    #     v = self.policy.v(o_ti)
+    #     return pi, v, h_first
