@@ -112,7 +112,7 @@ class Actor:
         o, h_out, pred_s = self.pred_present(s, a_lst, h_in, self.p_iters)
         pi = self.policy.pi(o)
         action = Categorical(pi).sample()
-        return action, pi, h_out, pred_s
+        return action.detach(), pi.detach(), h_out.detach(), pred_s.detach()
 
     def pred_present(self, s, a, h_in, iters):
         # generate h_in for all s

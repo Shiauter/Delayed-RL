@@ -7,7 +7,7 @@ import torch
 class Config:
     env_name: str
     model_root: str = "./models"
-    experiment_name = "debugging"
+    experiment_name = "test_delay_ppo_recording"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
     log_dir = f"{log_root}/{experiment_name}"
@@ -24,12 +24,12 @@ class Config:
     lr_pred_model: float = 3e-4
     lr_policy: float = 3e-4
     eps_clip: float = 0.2
-    K_epoch_training: int = 5
+    K_epoch_training: int = 500
     K_epoch_pred_model: int = 10
     K_epoch_policy: int = 3
     delay: int = 4
     p_iters: int = delay
-    num_actors: int = 5
+    num_actors: int = 10
     num_memos: int = 10
     T_horizon: int = 500
     hidden_size: int = 32
