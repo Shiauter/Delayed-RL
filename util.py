@@ -1,53 +1,47 @@
 import torch
-from torch.distributions.utils import probs_to_logits
-import os, sys, shutil
+import torch.nn as nn
+import torch.nn.functional as F
+import os, sys, shutil, math
 
-class Categorical:
-    def __init__(self, probs_shape):
-        # NOTE: probs_shape is supposed to be
-        #       the shape of probs that will be
-        #       produced by policy network
-        if len(probs_shape) < 1:
-            raise ValueError("`probs_shape` must be at least 1.")
-        self.probs_dim = len(probs_shape)
-        self.probs_shape = probs_shape
-        self._num_events = probs_shape[-1]
-        self._batch_shape = probs_shape[:-1] if self.probs_dim > 1 else torch.Size()
-        self._event_shape=torch.Size()
+class CrossAttention(nn.Module):
+    def __init__(self, query_dim, context_dim, h_dim, out_dim, n_heads, drop_p):
+        super().__init__()
 
-    def set_probs(self, probs):
-        # normalized the probs
-        self.probs = probs / probs.sum(-1, keepdim=True)
-        # log probabilities
-        # domain range changed from [0, 1] -> [-inf, inf]
-        self.logits = probs_to_logits(self.probs)
+        self.n_heads = n_heads
+        self.dim_per_head = h_dim // n_heads
+        assert h_dim % n_heads == 0, "Invalid numbers of heads"
 
-    def sample(self, sample_shape=torch.Size()):
-        if not isinstance(sample_shape, torch.Size):
-            sample_shape = torch.Size(sample_shape)
-        # reshape the probs to 2D
-        probs_2d = self.probs.reshape(-1, self._num_events)
-        # for each row, return n results with replacement, n == 1 result in my case
-        samples_2d = torch.multinomial(probs_2d, sample_shape.numel(), True).T
-        # reshape the results to specified shape
-        return samples_2d.reshape(sample_shape + self._batch_shape + self._event_shape)
+        self.q_net = nn.Linear(query_dim, h_dim)
+        self.k_net = nn.Linear(context_dim, h_dim)
+        self.v_net = nn.Linear(context_dim, h_dim)
 
-    def log_prob(self, value):
-        value = value.long().unsqueeze(-1)
-        # make value and logits have matched shape
-        value, log_pmf = torch.broadcast_tensors(value, self.logits)
-        value = value[..., :1]
-        # for each row, return log_pmf[value[row]]
-        return log_pmf.gather(-1, value).squeeze(-1)
+        self.proj_net = nn.Linear(h_dim, out_dim)
 
-    def entropy(self):
-        # to avoid large negative log probability when log(0) occurred
-        # we use "eps" instead of "min" here
-        min_real = torch.finfo(self.logits.dtype).min
-        logits = torch.clamp(self.logits, min=min_real)
-        # entropy
-        p_log_p = logits * self.probs
-        return -p_log_p.sum(-1)
+        self.att_drop = nn.Dropout(drop_p)
+        self.proj_drop = nn.Dropout(drop_p)
+
+    def forward(self, x):
+        query, context = x
+        B, T_q, C_q = query.shape  # (batch size, query length, query dim)
+        _, T_c, C_c = context.shape  # (batch size, context length, context dim)
+        H = self.n_heads  # Number of heads
+        D = self.dim_per_head  # Dimension per head
+
+        # Project Q, K, V
+        q = self.q_net(query).view(B, T_q, H, D).transpose(1, 2)  # (B, H, T_q, D)
+        k = self.k_net(context).view(B, T_c, H, D).transpose(1, 2)  # (B, H, T_c, D)
+        v = self.v_net(context).view(B, T_c, H, D).transpose(1, 2)  # (B, H, T_c, D)
+
+        # Scaled dot-product attention
+        weights = q @ k.transpose(-2, -1) / math.sqrt(D)  # (B, H, T_q, T_c)
+        normalized_weights = F.softmax(weights, dim=-1)  # Normalize across context dimension
+        attention = self.att_drop(normalized_weights @ v)  # (B, H, T_q, D)
+
+        # Merge heads and project output
+        attention = attention.transpose(1, 2).contiguous().view(B, T_q, H * D)  # (B, T_q, H*D)
+        out = self.proj_drop(self.proj_net(attention))  # (B, T_q, out_dim)
+        return out
+
 
 class Memory:
     def __init__(self, max_seq_len, exps=None):
@@ -83,6 +77,7 @@ class Memory:
     def get_current_size(self):
         return len(next(iter(self.exps.values()), []))
 
+
 def merge_dict(*dicts):
     result = {}
     for d in dicts:
@@ -91,6 +86,7 @@ def merge_dict(*dicts):
                 raise KeyError(f"Duplicate key found: {key}")
             result[key] = value
     return result
+
 
 def check_dir_exist(log_dir: str, saved_folder: str, record_dir: str):
     if os.path.exists(log_dir):
@@ -103,6 +99,7 @@ def check_dir_exist(log_dir: str, saved_folder: str, record_dir: str):
         os.makedirs(record_dir)
     else:
         clear_dir(record_dir)
+
 
 def clear_dir(dir: str):
     try:

@@ -17,6 +17,7 @@ class Learner:
     eps_clip: float
     K_epoch_policy: int
     K_epoch_pred_model: int
+    K_epoch_learn: int
     delay: int
     p_iters: int
     num_memos: int
@@ -25,7 +26,7 @@ class Learner:
     hidden_size: int
     h0: list
 
-    def __init__(self, actor: Actor, optim_pred_model, optim_policy, config: Config):
+    def __init__(self, actor: Actor, optim_pred_model, optim_policy, optimizer, config: Config):
         for key, value in vars(config).items():
             if key in self.__annotations__:
                 setattr(self, key, value)
@@ -33,26 +34,27 @@ class Learner:
         self.actor = actor
         self.optim_pred_model = optim_pred_model
         self.optim_policy = optim_policy
+        self.optim = optimizer
 
     def make_batch(self, memory: Memory):
         s, a, prob_a, r, s_prime, done, t, a_lst = \
             map(lambda key: torch.tensor(memory.exps[key]), memory.keys)
         return s, a, r, s_prime, done, prob_a, a_lst
 
-    def make_pred_s_tis(self, s, a_lsts, h_in, limit):
+    def make_pred_s_tis(self, s, a_lst, h_in):
         # s_ti = []
         # for i in range(limit):
         #     _, h_out, pred_s = self.actor.pred_present(s[i], a_lsts[i], h_in)
         #     s_ti.append(pred_s)
         #     h_in = h_out
-        _, _, pred_s = self.actor.pred_present(s[:limit], a_lsts[:, :limit], h_in, self.p_iters)
-        pred_s = pred_s.transpose(0, 1)
+        _, _, pred_s = self.actor.pred_present(s.unsqueeze(1), a_lst.unsqueeze(0), h_in, self.p_iters)
         return pred_s
 
     def make_offset_seq(self, s, offset: tuple, limit):
         idx = torch.arange(limit).unsqueeze(1) + torch.arange(offset[0], offset[1]).unsqueeze(0)
         idx = idx.clamp(max=len(s) - 1)
-        target = s[idx].view(-1, offset[1] - offset[0], self.s_size)
+        # print(idx)
+        target = s[idx].view(offset[1] - offset[0], -1, self.s_size)
         return target
 
     def learn_pred_model(self, memory_list: list[Memory]):
@@ -73,8 +75,9 @@ class Learner:
                 first_hidden = memory_list[i].h0.detach()
 
                 limit = len(s) - self.actor.delay
+                # print(len(s))
                 target = self.make_offset_seq(s, (1, self.p_iters + 1), limit)
-                pred = self.make_pred_s_tis(s.unsqueeze(1), a_lst.unsqueeze(0), first_hidden, limit)
+                pred = self.make_pred_s_tis(s[:limit], a_lst[:limit], first_hidden)
                 loss = self.actor.pred_model.criterion(pred, target)
                 pred_model_loss += loss
             pred_model_loss /= self.num_memos
@@ -121,8 +124,8 @@ class Learner:
             s, h_in
         )
         # _, pi, _, _ = self.actor.sample_action(s, a_lst, h_in)
-        # print(pi.shape, v.shape)
-        pi, v = pi.squeeze(1)[self.delay:], v[self.delay:].squeeze(1)
+        # print(pi.shape, v.shape, s.shape, a_lst.shape, h_in.shape)
+        pi, v = pi.squeeze(1)[self.delay:], v.squeeze(1)[self.delay:]
         return pi, v, second_hidden
 
     # def make_pi_and_critic_by_sample(self, s, a_lst, h_in):
@@ -170,6 +173,7 @@ class Learner:
                 # a, prob_a = a[self.actor.delay:], prob_a[:-self.actor.delay]
                 # limit = len(s) - self.actor.delay
                 # pi_a = self.make_pi_a(s, a, first_hidden, a_lst, limit)
+                # print(pi.shape, a.shape)
                 pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
                 ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
@@ -204,3 +208,67 @@ class Learner:
         for k in loss_log.keys():
             loss_log[k] = torch.mean(torch.stack(loss_log[k]))
         return loss_log, f'{loss_log["ppo_loss"]:.9f}'
+
+    def learn(self, memory_list: list[Memory]):
+        keys = ["total_loss", "pred_model_loss", "ppo_loss",
+                "policy_loss", "critic_loss", "entropy_bonus"]
+        loss_log = {}
+        for k in keys:
+            loss_log[k] = []
+
+        for epoch in range(self.K_epoch_learn):
+            total_ppo_loss, total_pred_model_loss = 0, 0
+            for i in range(self.num_memos):
+                s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
+                first_hidden = memory_list[i].h0.detach()
+
+                # pred model
+                if self.p_iters > 0:
+                    limit = len(s) - self.actor.delay
+                    target = self.make_offset_seq(s, (1, self.p_iters + 1), limit)
+                    pred = self.make_pred_s_tis(s[:limit], a_lst[:limit], first_hidden)
+                    pred_model_loss = self.actor.pred_model.criterion(pred, target)
+                else:
+                    pred_model_loss = torch.tensor(0, dtype=torch.float)
+                total_pred_model_loss += pred_model_loss
+
+                # policy
+                pi, v_s, second_hidden = self.make_pi_and_critic(s, a_lst, first_hidden)
+                _ , v_prime, _ = self.make_pi_and_critic(s_prime, a_lst, second_hidden)
+                advantage, return_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
+
+                pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
+                ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
+
+                surr1 = ratio * advantage
+                surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
+                policy_loss = torch.min(surr1, surr2).mean() # expected value
+
+                critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
+
+                entropy = Categorical(pi).entropy().mean()
+                entropy_bonus = self.entropy_weight * entropy
+
+                ppo_loss = - policy_loss + critic_loss - entropy_bonus
+
+                total_ppo_loss += ppo_loss
+
+                loss_log["policy_loss"].append(policy_loss.mean())
+                loss_log["critic_loss"].append(critic_loss.mean())
+                loss_log["entropy_bonus"].append(entropy_bonus.mean())
+
+            total_ppo_loss /= self.num_memos
+            total_pred_model_loss /= self.num_memos
+            total_loss = total_ppo_loss + total_pred_model_loss
+
+            self.optim.zero_grad()
+            total_loss.mean().backward()
+            self.optim.step()
+
+            loss_log["total_loss"].append(total_loss)
+            loss_log["ppo_loss"].append(total_ppo_loss)
+            loss_log["pred_model_loss"].append(total_pred_model_loss)
+
+        for k in loss_log.keys():
+            loss_log[k] = torch.mean(torch.stack(loss_log[k]))
+        return loss_log, f'{loss_log["total_loss"]:.9f}'

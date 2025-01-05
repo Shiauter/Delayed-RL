@@ -35,13 +35,14 @@ def recording_eval(env_name, model_state, record_dir:str, epoch:int):
             a = a.item()
             a_lst.append(a)
 
-            delay_a = a_lst.pop(0)
+            delay_a = a_lst[0]
             s_prime, r, terminated, truncated, _ = env.step(delay_a)
             done = terminated or truncated
             frame = env.render()
             frames.append(frame)
 
             s = s_prime
+            a_lst.pop(0)
             if done:
                 break
         record_path = f"{record_dir}/epoch_{epoch}.mp4"
@@ -54,97 +55,97 @@ def recording_eval(env_name, model_state, record_dir:str, epoch:int):
         env.close()
         return record_path
 
-def collect_data(env_name, model_state, config: Config, conn):
-    try:
-        with torch.no_grad():
-            env = gym.make(env_name)
-            model = Actor(config)
-            model.load_params(model_state)
-            memory = Memory(config.T_horizon)
+# def collect_data(env_name, model_state, config: Config, conn):
+#     try:
+#         with torch.no_grad():
+#             env = gym.make(env_name)
+#             model = Actor(config)
+#             model.load_params(model_state)
+#             memory = Memory(config.T_horizon)
 
-            s, _ = env.reset()
-            h_out = torch.zeros(config.h0).float()
-            a_lst = [i % 2 for i in range(config.delay)]
-            done = False
+#             s, _ = env.reset()
+#             h_out = torch.zeros(config.h0).float()
+#             a_lst = [i % 2 for i in range(config.delay)]
+#             done = False
 
-            while not done:
-                for t in range(model.T_horizon):
-                    h_in = h_out
-                    a, prob, h_out, _ = model.sample_action(
-                        torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
-                        torch.tensor(a_lst).view(1, 1, -1),
-                        h_in
-                    )
-                    # a, prob, h_out, _ = model.sample_action(
-                    #     torch.from_numpy(s), torch.tensor(a_lst), h_in
-                    #     )
-                    prob = prob.view(-1)
-                    a = a.item()
-                    a_lst.append(a)
+#             while not done:
+#                 for t in range(model.T_horizon):
+#                     h_in = h_out
+#                     a, prob, h_out, _ = model.sample_action(
+#                         torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
+#                         torch.tensor(a_lst).view(1, 1, -1),
+#                         h_in
+#                     )
+#                     # a, prob, h_out, _ = model.sample_action(
+#                     #     torch.from_numpy(s), torch.tensor(a_lst), h_in
+#                     #     )
+#                     prob = prob.view(-1)
+#                     a = a.item()
+#                     a_lst.append(a)
 
-                    delay_a = a_lst.pop(0)
-                    s_prime, r, terminated, truncated, _ = env.step(delay_a)
-                    done = terminated or truncated
+#                     delay_a = a_lst.pop(0)
+#                     s_prime, r, terminated, truncated, _ = env.step(delay_a)
+#                     done = terminated or truncated
 
-                    # exp = {
-                    #     "states": torch.from_numpy(s).detach(),
-                    #     "actions": torch.tensor(delay_a).detach().view(-1),
-                    #     "probs": prob[a].detach().view(-1),
-                    #     "rewards": torch.tensor(r / 100.0).detach().view(-1),
-                    #     "states_prime": torch.from_numpy(s_prime).detach(),
-                    #     "dones": torch.tensor(0 if done else 1).detach().view(-1),
-                    #     "timesteps": torch.tensor(t).detach().view(-1),
-                    #     "a_lsts": torch.tensor(a_lst).detach().view(-1)
-                    # }
-                    exp = {
-                        "states": s.tolist(),
-                        "actions": [delay_a],
-                        "probs": [prob[a].item()],
-                        "rewards": [r / 100.0],
-                        "states_prime": s_prime.tolist(),
-                        "dones": [0 if done else 1],
-                        "timesteps": [t],
-                        "a_lsts": a_lst
-                    }
-                    memory.store(**exp)
-                    memory.set_hidden(h_in.detach())
-                    memory.score += r
+#                     # exp = {
+#                     #     "states": torch.from_numpy(s).detach(),
+#                     #     "actions": torch.tensor(delay_a).detach().view(-1),
+#                     #     "probs": prob[a].detach().view(-1),
+#                     #     "rewards": torch.tensor(r / 100.0).detach().view(-1),
+#                     #     "states_prime": torch.from_numpy(s_prime).detach(),
+#                     #     "dones": torch.tensor(0 if done else 1).detach().view(-1),
+#                     #     "timesteps": torch.tensor(t).detach().view(-1),
+#                     #     "a_lsts": torch.tensor(a_lst).detach().view(-1)
+#                     # }
+#                     exp = {
+#                         "states": s.tolist(),
+#                         "actions": [delay_a],
+#                         "probs": [prob[a].item()],
+#                         "rewards": [r / 100.0],
+#                         "states_prime": s_prime.tolist(),
+#                         "dones": [0 if done else 1],
+#                         "timesteps": [t],
+#                         "a_lsts": a_lst
+#                     }
+#                     memory.store(**exp)
+#                     memory.set_hidden(h_in.detach())
+#                     memory.score += r
 
-                    s = s_prime
-                    if done:
-                        break
-            conn.send(memory)
-    finally:
-        env.close()
-        conn.close()
+#                     s = s_prime
+#                     if done:
+#                         break
+#             conn.send(memory)
+#     finally:
+#         env.close()
+#         conn.close()
 
-def parallel_process(config: Config, model_state) -> list[Memory]:
-    env_name, num_memos, num_actors = config.env_name, config.num_memos, config.num_actors
+# def parallel_process(config: Config, model_state) -> list[Memory]:
+#     env_name, num_memos, num_actors = config.env_name, config.num_memos, config.num_actors
 
-    processes = []
-    parent_conns, child_conns = zip(*[mp.Pipe() for _ in range(num_memos)])
-    aggregated_data = []
-    num_batches = (num_memos + num_actors - 1) // num_actors
-    for batch_idx in range(num_batches):
-        start = batch_idx * num_actors
-        end = min(start + num_actors, num_memos)
+#     processes = []
+#     parent_conns, child_conns = zip(*[mp.Pipe() for _ in range(num_memos)])
+#     aggregated_data = []
+#     num_batches = (num_memos + num_actors - 1) // num_actors
+#     for batch_idx in range(num_batches):
+#         start = batch_idx * num_actors
+#         end = min(start + num_actors, num_memos)
 
-        processes.clear()
+#         processes.clear()
 
-        for i in range(start, end):
-            p = mp.Process(target=collect_data, args=(env_name, model_state, config, child_conns[i]))
-            processes.append(p)
-            p.start()
+#         for i in range(start, end):
+#             p = mp.Process(target=collect_data, args=(env_name, model_state, config, child_conns[i]))
+#             processes.append(p)
+#             p.start()
 
-        for i in range(start, end):
-            data = parent_conns[i].recv()
-            aggregated_data.append(data)
+#         for i in range(start, end):
+#             data = parent_conns[i].recv()
+#             aggregated_data.append(data)
 
-        for p in processes:
-            p.join()
-            p.close()
+#         for p in processes:
+#             p.join()
+#             p.close()
 
-    return aggregated_data
+#     return aggregated_data
 
 def worker(env_name, config: Config, conn):
     env = gym.make(env_name)
@@ -160,10 +161,11 @@ def worker(env_name, config: Config, conn):
                 conn.send((s, a_lst, h_out))
 
             elif cmd == "step":
-                a, prob, h_out, _ = data
                 h_in = h_out
+                a, prob, h_out, _ = data
                 prob = prob.view(-1)
                 a = a.item()
+                a_lst.append(a)
 
                 delay_a = a_lst[0]
                 s_prime, r, terminated, truncated, _ = env.step(delay_a)
@@ -175,15 +177,14 @@ def worker(env_name, config: Config, conn):
                     "rewards": [r / 100.0],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
-                    "a_lsts": a_lst
+                    "a_lsts": a_lst[:-1]
                 }
-                a_lst.append(a)
-                a_lst.pop(0)
                 memory.store(**exp)
                 memory.set_hidden(h_in.detach())
                 memory.score += r
 
                 s = s_prime
+                a_lst.pop(0)
                 conn.send((s, a_lst, h_in, done))
             elif cmd == "get_memo":
                 conn.send(memory)
@@ -267,18 +268,25 @@ if __name__ == "__main__":
     optim_policy = optim.Adam(
         [
             {"params": actor.rnn.parameters()},
-            {"params": actor.policy.parameters()},
-            # {"params": actor.pred_model.parameters()}
+            {"params": actor.policy.parameters()}
         ],
         lr=config.lr_policy
     )
-    learner = Learner(actor, optim_pred_model, optim_policy, config)
+    optimizer = optim.Adam(
+        [
+            {"params": actor.rnn.parameters()},
+            {"params": actor.policy.parameters()},
+            {"params": actor.pred_model.parameters()}
+        ],
+        lr=config.lr
+    )
+    learner = Learner(actor, optim_pred_model, optim_policy, optimizer, config)
 
 
     print()
     print(f"* Experiment: {config.experiment_name}\n")
 
-    do_save = True
+    do_save = config.do_save
     if do_save:
         log_dir, saved_folder, record_dir = config.log_dir, config.saved_folder, config.record_dir
         check_dir_exist(log_dir, saved_folder, record_dir)
@@ -300,12 +308,16 @@ if __name__ == "__main__":
         avg_score = total_score / config.num_memos
         print(f"|| Avg score : {avg_score:.1f}")
 
-        print(f"> {'Training for predictive model...':<35}", end=" ")
-        pred_model_log, avg_loss_str = learner.learn_pred_model(memory_list)
-        print(f"|| Avg Loss  : {avg_loss_str}")
+        # print(f"> {'Training for policy...':<35}", end=" ")
+        # ppo_log, avg_loss_str = learner.learn_policy(memory_list)
+        # print(f"|| Avg Loss  : {avg_loss_str}")
 
-        print(f"> {'Training for policy...':<35}", end=" ")
-        ppo_log, avg_loss_str = learner.learn_policy(memory_list)
+        # print(f"> {'Training for predictive model...':<35}", end=" ")
+        # pred_model_log, avg_loss_str = learner.learn_pred_model(memory_list)
+        # print(f"|| Avg Loss  : {avg_loss_str}")
+
+        print(f"> {'Training...':<35}", end=" ")
+        loss_log, avg_loss_str = learner.learn(memory_list)
         print(f"|| Avg Loss  : {avg_loss_str}")
 
         if do_save:
@@ -320,7 +332,8 @@ if __name__ == "__main__":
             print(f"> Model is saved in \"{saved_path}\"")
 
             try:
-                log = merge_dict(pred_model_log, ppo_log)
+                # log = merge_dict(pred_model_log, ppo_log)
+                log = loss_log
                 log["score"] = avg_score
                 for k, v in log.items():
                     writer.add_scalar(k, v, ep)

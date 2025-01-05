@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-# from util import Categorical
+from util import CrossAttention
 from config import Config
 
 class PredictiveModel(nn.Module):
@@ -12,20 +12,52 @@ class PredictiveModel(nn.Module):
         self.in_dim = state_dim + action_dim + hidden_dim
         self.out_dim = out_dim
 
+        self.attention = CrossAttention(
+            state_dim,
+            action_dim + hidden_dim,
+            64,
+            self.in_dim,
+            1,
+            0.0
+        )
         self.D = nn.Sequential(
             nn.Linear(self.in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.out_dim)
+            # CrossAttention(
+            #     state_dim,
+            #     action_dim + hidden_dim,
+            #     64,
+            #     out_dim,
+            #     4,
+            #     0.0
+            # )
         )
         self.N = nn.Sequential(
             nn.Linear(self.in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.out_dim)
+            # CrossAttention(
+            #     state_dim,
+            #     action_dim + hidden_dim,
+            #     64,
+            #     out_dim,
+            #     4,
+            #     0.0
+            # )
         )
         self.F = nn.Sequential(
             nn.Linear(self.in_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, self.out_dim),
+            # CrossAttention(
+            #     state_dim,
+            #     action_dim + hidden_dim,
+            #     64,
+            #     out_dim,
+            #     4,
+            #     0.0
+            # ),
             nn.Sigmoid()
         )
         self.criterion = nn.MSELoss()
@@ -38,7 +70,10 @@ class PredictiveModel(nn.Module):
         # action = action.view(-1)
         # gru_out = gru_out.view(-1)
 
-        x = torch.cat([state, action, gru_out], dim=-1)
+        query, context = state, torch.cat([action, gru_out], dim=-1)
+        x = (query, context)
+        x = self.attention(x)
+        # x = torch.cat([state, action, gru_out], dim=-1)
         delta = self.D(x) # D(s, a)
         adjusted_state = state + delta # s + D(s, a)
 
@@ -110,6 +145,8 @@ class Actor:
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out, pred_s = self.pred_present(s, a_lst, h_in, self.p_iters)
+        # print(o.shape, h_out.shape)
+        # print(pred_s.shape)
         pi = self.policy.pi(o)
         action = Categorical(pi).sample()
         return action.detach(), pi.detach(), h_out.detach(), pred_s.detach()
@@ -118,27 +155,41 @@ class Actor:
         # generate h_in for all s
         # (seq_len, batch=1, data_dim)
         o, _ = self.rnn(s, h_in)
+        # print(o.shape)
         o = torch.cat([h_in, o[:-1]])
+        # print(o.shape)
 
         # generate s_ti for all s
         # (seq_len=1, batch, data_dim)
-        s_ti = []
+        o_ti, s_ti = [], []
         s, h = s.transpose(0, 1), o.transpose(0, 1)
+        # print(s.shape, a.shape, h.shape)
         s, h, a = torch.split(s, self.batch_size, dim=1), \
-                      torch.split(h, self.batch_size, dim=1), \
-                      torch.split(a, self.batch_size, dim=1)
+                    torch.split(h, self.batch_size, dim=1), \
+                    torch.split(a, self.batch_size, dim=1)
+        # print(len(s), len(h), len(a))
 
         for pred_s, h_in, a_lst in zip(s, h, a):
-            mini_s_ti = []
+            mini_o_ti, mini_s_ti = [], []
+            # print(a_lst.shape)
             a_lst = torch.split(a_lst, 1, dim=-1)
-            o_ti, h_ti = self.rnn(pred_s, h_in)
+            # print(a_lst[0].shape)
+            pred_o, h_ti = self.rnn(pred_s, h_in)
+            # print(pred_o.shape, h_ti.shape)
             h_first = h_ti
             for i in range(iters):
-                pred_s = self.pred_model(pred_s, a_lst[i], o_ti)
+                pred_s = self.pred_model(pred_s, a_lst[i], pred_o)
+                # print(pred_s.shape)
                 mini_s_ti.append(pred_s)
-                o_ti, h_ti = self.rnn(pred_s, h_ti)
+                pred_o, h_ti = self.rnn(pred_s, h_ti)
+                mini_o_ti.append(pred_o)
+                # print(pred_o.shape, h_ti.shape)
+            mini_o_ti = torch.cat(mini_o_ti) if len(mini_o_ti) > 0 else torch.tensor([])
             mini_s_ti = torch.cat(mini_s_ti) if len(mini_s_ti) > 0 else torch.tensor([])
+            # print(mini_o_ti.shape, mini_s_ti.shape)
+            o_ti.append(mini_o_ti)
             s_ti.append(mini_s_ti)
+        o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0) if iters > 0 else pred_o
         s_ti = torch.cat(s_ti, dim=1)
         return o_ti, h_first, s_ti
 
