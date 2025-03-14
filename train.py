@@ -6,8 +6,8 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
-from actor import Actor
-from learner import Learner
+from actor_vrnn import Actor
+from learner_vrnn import Learner
 from util import Memory, merge_dict, check_dir_exist
 from config import Config
 
@@ -287,6 +287,7 @@ if __name__ == "__main__":
     print(f"* Experiment: {config.experiment_name}\n")
 
     do_save = config.do_save
+    do_train = config.do_train
     if do_save:
         log_dir, saved_folder, record_dir = config.log_dir, config.saved_folder, config.record_dir
         check_dir_exist(log_dir, saved_folder, record_dir)
@@ -316,9 +317,10 @@ if __name__ == "__main__":
         # pred_model_log, avg_loss_str = learner.learn_pred_model(memory_list)
         # print(f"|| Avg Loss  : {avg_loss_str}")
 
-        print(f"> {'Training...':<35}", end=" ")
-        loss_log, avg_loss_str = learner.learn(memory_list)
-        print(f"|| Avg Loss  : {avg_loss_str}")
+        if do_train:
+            print(f"> {'Training...':<35}", end=" ")
+            loss_log, avg_loss_str = learner.learn(memory_list)
+            print(f"|| Avg Loss  : {avg_loss_str}")
 
         if do_save:
             print("-" * 65)

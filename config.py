@@ -7,7 +7,7 @@ import torch
 class Config:
     env_name: str
     model_root: str = "./models"
-    experiment_name = "test_learn_together2"
+    experiment_name = "test_vrnn2"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
     log_dir = f"{log_root}/{experiment_name}"
@@ -41,6 +41,7 @@ class Config:
 
     # for debugging
     do_save: bool = True
+    do_train: bool = True
 
     def __post_init__(self):
         env = gym.make(self.env_name)
