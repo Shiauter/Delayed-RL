@@ -34,4 +34,4 @@ python train.py
 tensorboard --logdir logs
 ```
 
-超參數的調整主要是在config.py中
+超參數以及檔案路徑等等的調整主要是在config.py中
