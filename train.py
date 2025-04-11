@@ -8,13 +8,13 @@ from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
 from actor_vrnn import Actor
 from learner_vrnn import Learner
-from util import Memory, merge_dict, check_dir_exist
+from util import Memory, merge_dict, check_dir_exist, action_data_sample
 from config import Config
 
 
-def recording_eval(env_name, model_state, record_dir:str, epoch:int):
+def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
     with torch.no_grad():
-        env = gym.make(env_name, render_mode="rgb_array")
+        env = gym.make(config.env_name, render_mode="rgb_array")
         model = Actor(config)
         model.load_params(model_state)
 
@@ -155,8 +155,9 @@ def worker(env_name, config: Config, conn):
         while True:
             cmd, data = conn.recv()
             if cmd == "reset":
-                s, _ = env.reset()
+                s, _ = env.reset(seed=123)
                 h_out = torch.zeros(config.h0).float()
+                copied_actions = action_data_sample[config.delay:]
                 a_lst = [i % 2 for i in range(config.delay)]
                 conn.send((s, a_lst, h_out))
 
@@ -164,7 +165,7 @@ def worker(env_name, config: Config, conn):
                 h_in = h_out
                 a, prob, h_out, _ = data
                 prob = prob.view(-1)
-                a = a.item()
+                a = 0 if len(copied_actions) == 0 else copied_actions[0][0]
                 a_lst.append(a)
 
                 delay_a = a_lst[0]
@@ -185,6 +186,8 @@ def worker(env_name, config: Config, conn):
 
                 s = s_prime
                 a_lst.pop(0)
+                if len(copied_actions) > 0:
+                    copied_actions.pop(0)
                 conn.send((s, a_lst, h_in, done))
             elif cmd == "get_memo":
                 conn.send(memory)
@@ -267,7 +270,6 @@ if __name__ == "__main__":
     )
     optim_policy = optim.Adam(
         [
-            {"params": actor.rnn.parameters()},
             {"params": actor.policy.parameters()}
         ],
         lr=config.lr_policy
@@ -280,7 +282,8 @@ if __name__ == "__main__":
         ],
         lr=config.lr
     )
-    learner = Learner(actor, optim_pred_model, optim_policy, optimizer, config)
+    learner = Learner(config, optim_pred_model, optim_policy, optimizer)
+    prev_loss_log = None
 
 
     print()
@@ -319,14 +322,16 @@ if __name__ == "__main__":
 
         if do_train:
             print(f"> {'Training...':<35}", end=" ")
-            loss_log, avg_loss_str = learner.learn(memory_list)
+            loss_log, avg_loss_str = learner.separated_learning(memory_list)
             print(f"|| Avg Loss  : {avg_loss_str}")
+            pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log)
+            prev_loss_log = loss_log
 
         if do_save:
             print("-" * 65)
             do_record = ep % config.record_interval == 0 and do_save
             if do_record:
-                record_path = recording_eval(config.env_name, model_state, record_dir, ep)
+                record_path = recording_eval(config, model_state, record_dir, ep)
                 print(f"> Recording is saved in \"{record_path}\"")
 
             saved_path = f"{saved_folder}/epoch_{ep}_{config.model_name}"
@@ -337,6 +342,8 @@ if __name__ == "__main__":
                 # log = merge_dict(pred_model_log, ppo_log)
                 log = loss_log
                 log["score"] = avg_score
+                log["pred_model_param_tier"] = pred_model_param_tier
+                log["policy_param_tier"] = policy_param_tier
                 for k, v in log.items():
                     writer.add_scalar(k, v, ep)
             except KeyError as e:

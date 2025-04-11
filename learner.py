@@ -26,7 +26,7 @@ class Learner:
     hidden_size: int
     h0: list
 
-    def __init__(self, actor: Actor, optim_pred_model, optim_policy, optimizer, config: Config):
+    def __init__(self, actor: Actor, config: Config, optim_pred_model=None, optim_policy=None, optimizer=None):
         for key, value in vars(config).items():
             if key in self.__annotations__:
                 setattr(self, key, value)

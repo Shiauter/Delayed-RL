@@ -42,6 +42,7 @@ class Actor:
     p_iters: int
     T_horizon: int
     hidden_size: int
+    z_size: int
     batch_size: int
 
     def __init__(self, config: Config):
@@ -49,12 +50,16 @@ class Actor:
             if key in self.__annotations__:
                 setattr(self, key, value)
 
-        z_dim = self.hidden_size // 2
         self.pred_model = VAE(
-            self.s_size, z_dim, 1, self.hidden_size
+            self.s_size, self.z_size, 1, self.hidden_size
         )
-        self.rnn = RNN(self.s_size + z_dim, 64, self.hidden_size)
+        self.rnn = RNN(self.s_size + self.z_size, 64, self.hidden_size)
         self.policy = Policy(self.hidden_size, self.a_size)
+
+    def set_device(self, device: str):
+        self.rnn.to(device)
+        self.pred_model.to(device)
+        self.policy.to(device)
 
     def load_params(self, state_dict: list[dict]):
         self.rnn.load_state_dict(state_dict[0])
@@ -88,7 +93,34 @@ class Actor:
                 a_lst = torch.split(a_lst, 1, dim=-1)
                 h_first, h_ti = None, h_in
                 for i in range(iters):
-                    pred_s, phi_x_t, z_t, phi_z_t = self.pred_model(pred_s, a_lst[i], h_ti)
+                    pred_s, phi_x_t, phi_z_t = self.pred_model(pred_s, a_lst[i], h_ti)
+                    pred_o, h_ti = self.rnn(torch.cat([phi_x_t, phi_z_t], dim=-1), h_ti)
+                    mini_s_ti.append(pred_s)
+                    mini_o_ti.append(pred_o)
+                    if h_first is None:
+                        h_first = h_ti
+                mini_o_ti = torch.cat(mini_o_ti) if len(mini_o_ti) > 0 else torch.tensor([])
+                mini_s_ti = torch.cat(mini_s_ti) if len(mini_s_ti) > 0 else torch.tensor([])
+                o_ti.append(mini_o_ti)
+                s_ti.append(mini_s_ti)
+            o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0) if iters > 0 else pred_o
+            s_ti = torch.cat(s_ti, dim=1)
+        # o_ti = torch.cat([o_ti, phi_z_t], dim=-1)
+        return o_ti, h_first, s_ti
+
+    def pred_present_old(self, s, a, h_in, iters):
+        if iters > 0:
+            o_ti, s_ti, z = [], [], []
+            s, h, a = torch.split(s, self.batch_size, dim=1), \
+                        torch.split(h_in, self.batch_size, dim=1), \
+                        torch.split(a, self.batch_size, dim=1)
+
+            for pred_s, h_in, a_lst in zip(s, h, a):
+                mini_o_ti, mini_s_ti = [], []
+                a_lst = torch.split(a_lst, 1, dim=-1)
+                h_first, h_ti = None, h_in
+                for i in range(iters):
+                    pred_s, phi_x_t, phi_z_t = self.pred_model(pred_s, a_lst[i], h_ti)
                     pred_o, h_ti = self.rnn(torch.cat([phi_x_t, phi_z_t], dim=-1), h_ti)
                     mini_s_ti.append(pred_s)
                     mini_o_ti.append(pred_o)
@@ -101,10 +133,3 @@ class Actor:
             o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0) if iters > 0 else pred_o
             s_ti = torch.cat(s_ti, dim=1)
         return o_ti, h_first, s_ti
-
-    def pred_prob_and_critic(self, s, h_in):
-        o, _ = self.rnn(s, h_in)
-        second_hidden = o[0].unsqueeze(0)
-        pi = self.policy.pi(o)
-        v = self.policy.v(o)
-        return pi, v, second_hidden.detach()

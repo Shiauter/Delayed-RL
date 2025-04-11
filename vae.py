@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
-EPS = torch.finfo(torch.float).eps # numerical logs
+EPS = 1e-6
+LOG_2PI = math.log(2 * math.pi)
 
 class VAE(nn.Module):
     def __init__(self, x_dim, z_dim, a_dim, h_dim):
@@ -20,7 +22,9 @@ class VAE(nn.Module):
             nn.ReLU()
         )
         self.phi_z = nn.Sequential(
-            nn.Linear(z_dim, z_dim),
+            nn.Linear(z_dim, h_dim),
+            nn.ReLU(),
+            nn.Linear(h_dim, z_dim),
             nn.ReLU()
         )
 
@@ -31,20 +35,16 @@ class VAE(nn.Module):
             nn.ReLU()
         )
         self.enc_mean = nn.Linear(h_dim, z_dim)
-        self.enc_std = nn.Sequential(
-            nn.Linear(h_dim, z_dim),
-            nn.Softplus()
-        )
+        self.enc_std = nn.Linear(h_dim, z_dim)
 
         self.prior_net = nn.Sequential(
             nn.Linear(x_dim + h_dim, h_dim),
+            nn.ReLU(),
+            nn.Linear(h_dim, h_dim),
             nn.ReLU()
         )
         self.prior_mean = nn.Linear(h_dim, z_dim)
-        self.prior_std = nn.Sequential(
-            nn.Linear(h_dim, z_dim),
-            nn.Softplus()
-        )
+        self.prior_std = nn.Linear(h_dim, z_dim)
 
         self.dec_net = nn.Sequential(
             nn.Linear(z_dim + a_dim + h_dim, h_dim),
@@ -52,85 +52,84 @@ class VAE(nn.Module):
             nn.Linear(h_dim, h_dim),
             nn.ReLU()
         )
-        self.dec_std = nn.Sequential(
-            nn.Linear(h_dim, x_dim),
-            nn.Softplus()
-        )
-        self.dec_mean = nn.Sequential(
-            nn.Linear(h_dim, x_dim),
-            nn.Sigmoid()
-        )
-
-        # projection
-        self.proj = nn.Linear(x_dim + z_dim + a_dim, x_dim)
+        self.dec_std = nn.Linear(h_dim, x_dim)
+        self.dec_mean = nn.Linear(h_dim, x_dim)
 
     def encode(self, *args):
         enc_t = self.enc_net(torch.cat(args, dim=-1))
         enc_mean_t, enc_std_t = self.enc_mean(enc_t), self.enc_std(enc_t)
+        enc_std_t = torch.clamp(F.softplus(enc_std_t), min=EPS)
         return enc_mean_t, enc_std_t
 
     def decode(self, *args):
         dec_t = self.dec_net(torch.cat(args, dim=-1))
         dec_mean_t, dec_std_t = self.dec_mean(dec_t), self.dec_std(dec_t)
+        dec_std_t = torch.clamp(F.softplus(dec_std_t), min=EPS)
         return dec_mean_t, dec_std_t
 
     def prior(self, *args):
         prior_t = self.prior_net(torch.cat(args, dim=-1))
         prior_mean_t, prior_std_t = self.prior_mean(prior_t), self.prior_std(prior_t)
+        prior_std_t = torch.clamp(F.softplus(prior_std_t), min=EPS)
         return prior_mean_t, prior_std_t
 
     # for training
-    def reconstruct(self, x_truth, x_cond, h_truth, h_cond, a):
-        phi_x_truth = self.phi_x(x_truth)
-        enc_mean_t, enc_std_t = self.encode(phi_x_truth, x_cond, h_truth)
-        phi_z_truth = self.phi_z((self._reparameterized_sample(enc_mean_t, enc_std_t)))
+    def reconstruct(self, x, s_t, a, h):
+        phi_x_t = self.phi_x(x)
+        enc_mean_t, enc_std_t = self.encode(phi_x_t, s_t, h)
+        phi_z_t = self.phi_z(self._reparameterized_sample(enc_mean_t, enc_std_t))
 
-        prior_mean_t, prior_std_t = self.prior(x_cond, h_cond)
-        phi_z_cond = self.phi_z((self._reparameterized_sample(prior_mean_t, prior_std_t)))
+        prior_mean_t, prior_std_t = self.prior(s_t, h)
 
-        dec_mean_truth, dec_std_truth = self.decode(phi_z_truth, a, h_truth)
-        dec_mean_cond, _ = self.decode(phi_z_cond, a, h_cond)
-        phi_x_cond = self.phi_x(dec_mean_cond)
+        dec_mean_t, dec_std_t = self.decode(phi_z_t, a, h)
 
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
-        nll_loss = self._nll_gauss(dec_mean_truth, dec_std_truth, x_truth)
+        nll_loss, mse = self._nll_gauss(dec_mean_t, dec_std_t, x)
+        return kld_loss, nll_loss, phi_x_t, phi_z_t, mse
 
-        return (kld_loss, nll_loss), \
-            (
-                phi_x_truth, phi_z_truth,
-                phi_x_cond, phi_z_cond
-            )
-
-    def forward(self, s, a, h):
+    def forward(self, s_t, a, h):
         # s = (batch, s_size)
         # a = (batch, 1)
         # h = (batch, hidden_size)
         # print("s, a, h ->", s.shape, a.shape, h.shape)
-        prior_mean_t, prior_std_t = self.prior(s, h)
+        prior_mean_t, prior_std_t = self.prior(s_t, h)
         # print("prior mean & std ->", prior_mean_t.shape, prior_std_t.shape)
         z_t = self._reparameterized_sample(prior_mean_t, prior_std_t)
         # print("z ->", z_t.shape)
         phi_z_t = self.phi_z(z_t)
         # print("phi_z_t ->", phi_z_t.shape)
         # print("dec in ->", torch.cat([phi_z_t, a, h], dim=-1).shape)
-        dec_mean_t, _ = self.decode(phi_z_t, a, h)
+        dec_mean_t, dec_std_t = self.decode(phi_z_t, a, h)
         # print("dec_mean_t ->", dec_mean_t.shape)
         phi_x_t = self.phi_x(dec_mean_t)
         # print("phi_x_t ->", phi_x_t.shape)
 
-        return dec_mean_t, phi_x_t, z_t, phi_z_t
+        return dec_mean_t, phi_x_t, phi_z_t
 
     def _reparameterized_sample(self, mean, std):
-        eps = torch.empty(size=std.size(), dtype=torch.float).normal_()
-        return eps.mul(std).add_(mean)
+        eps = torch.randn_like(std)
+        return mean + eps * torch.clamp(std, min=EPS)
 
     def _kld_gauss(self, mean_1, std_1, mean_2, std_2):
-        """Using std to compute KLD"""
-
-        kld_element =  (2 * torch.log(std_2 + EPS) - 2 * torch.log(std_1 + EPS) +
-            (std_1.pow(2) + (mean_1 - mean_2).pow(2)) /
-            std_2.pow(2) - 1)
-        return	0.5 * torch.sum(kld_element)
+        kld_element = (2 * torch.log(std_2 + EPS) - 2 * torch.log(std_1 + EPS) + \
+            (std_1.pow(2) + (mean_1 - mean_2).pow(2)) / (std_2.pow(2) + EPS) - 1) * 0.2
+        return	torch.sum(kld_element, dim=-1)
 
     def _nll_gauss(self, mean, std, x):
-        return torch.sum(torch.log(std + 1e-8) + (x - mean).pow(2) / (2 * std.pow(2)) + 0.5 * torch.log(torch.tensor(2 * math.pi)))
+        std = torch.clamp(std, min=EPS)
+        var = std.pow(2)
+        log_term = torch.log(var * (2 * torch.pi))
+        sqr_term = (x - mean).pow(2) / var
+        nll_element = (log_term + sqr_term) / 2
+        nll_loss = torch.sum(nll_element, dim=-1)
+        # pytorch_nll_loss_sum = F.gaussian_nll_loss(mean, x, var, reduction="sum")
+        # pytorch_nll_loss_mean = F.gaussian_nll_loss(mean, x, var)
+        pytorch_mse_loss = F.mse_loss(mean, x)
+        return nll_loss, pytorch_mse_loss
+
+    def _nll_gauss_old(self, mean, std, x):
+        std = torch.clamp(std, min=EPS)
+        log_std = torch.log(std)
+        sqr_term = (x - mean).pow(2) / (2 * (std.pow(2)))
+        nll_element = log_std + sqr_term + 0.5 * LOG_2PI
+        return torch.sum(nll_element, dim=-1)
