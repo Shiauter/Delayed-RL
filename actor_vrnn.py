@@ -82,6 +82,12 @@ class Actor:
         return action.detach(), pi.detach(), h_out.detach(), pred_s.detach()
 
     def pred_present(self, s, a, h_in, iters):
+        # 這裡是假設會以batch的形式輸入
+        # shape => (seq_len, batch, data_size)
+        # sample_action的輸入形狀為(1, 1, data_size)
+
+        # 將輸入分成幾個mini_batch
+        # 最後再將mini_batch組合起來
         if iters > 0:
             o_ti, s_ti = [], []
             s, h, a = torch.split(s, self.batch_size, dim=1), \
@@ -108,28 +114,28 @@ class Actor:
         # o_ti = torch.cat([o_ti, phi_z_t], dim=-1)
         return o_ti, h_first, s_ti
 
-    def pred_present_old(self, s, a, h_in, iters):
-        if iters > 0:
-            o_ti, s_ti, z = [], [], []
-            s, h, a = torch.split(s, self.batch_size, dim=1), \
-                        torch.split(h_in, self.batch_size, dim=1), \
-                        torch.split(a, self.batch_size, dim=1)
+    # def pred_present_old(self, s, a, h_in, iters):
+    #     if iters > 0:
+    #         o_ti, s_ti, z = [], [], []
+    #         s, h, a = torch.split(s, self.batch_size, dim=1), \
+    #                     torch.split(h_in, self.batch_size, dim=1), \
+    #                     torch.split(a, self.batch_size, dim=1)
 
-            for pred_s, h_in, a_lst in zip(s, h, a):
-                mini_o_ti, mini_s_ti = [], []
-                a_lst = torch.split(a_lst, 1, dim=-1)
-                h_first, h_ti = None, h_in
-                for i in range(iters):
-                    pred_s, phi_x_t, phi_z_t = self.pred_model(pred_s, a_lst[i], h_ti)
-                    pred_o, h_ti = self.rnn(torch.cat([phi_x_t, phi_z_t], dim=-1), h_ti)
-                    mini_s_ti.append(pred_s)
-                    mini_o_ti.append(pred_o)
-                    if h_first is None:
-                        h_first = h_ti
-                mini_o_ti = torch.cat(mini_o_ti) if len(mini_o_ti) > 0 else torch.tensor([])
-                mini_s_ti = torch.cat(mini_s_ti) if len(mini_s_ti) > 0 else torch.tensor([])
-                o_ti.append(mini_o_ti)
-                s_ti.append(mini_s_ti)
-            o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0) if iters > 0 else pred_o
-            s_ti = torch.cat(s_ti, dim=1)
-        return o_ti, h_first, s_ti
+    #         for pred_s, h_in, a_lst in zip(s, h, a):
+    #             mini_o_ti, mini_s_ti = [], []
+    #             a_lst = torch.split(a_lst, 1, dim=-1)
+    #             h_first, h_ti = None, h_in
+    #             for i in range(iters):
+    #                 pred_s, phi_x_t, phi_z_t = self.pred_model(pred_s, a_lst[i], h_ti)
+    #                 pred_o, h_ti = self.rnn(torch.cat([phi_x_t, phi_z_t], dim=-1), h_ti)
+    #                 mini_s_ti.append(pred_s)
+    #                 mini_o_ti.append(pred_o)
+    #                 if h_first is None:
+    #                     h_first = h_ti
+    #             mini_o_ti = torch.cat(mini_o_ti) if len(mini_o_ti) > 0 else torch.tensor([])
+    #             mini_s_ti = torch.cat(mini_s_ti) if len(mini_s_ti) > 0 else torch.tensor([])
+    #             o_ti.append(mini_o_ti)
+    #             s_ti.append(mini_s_ti)
+    #         o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0) if iters > 0 else pred_o
+    #         s_ti = torch.cat(s_ti, dim=1)
+    #     return o_ti, h_first, s_ti

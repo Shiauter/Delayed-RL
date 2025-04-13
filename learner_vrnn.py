@@ -49,6 +49,9 @@ class Learner:
         return s, a, r, s_prime, done, prob_a, a_lst
 
     def make_offset_seq(self, s, offset: tuple, limit):
+        # 給定一組episode中真實的states，以每個state的index為基準，找出相對它offset[0] ~ offset[1] - 1的位置的states所組成的序列
+        # limit是最後一個被選為基準的state的index
+        # e.g. 假設目前以s[1]為基準，且offset = (1, 3)，對應的序列為s[1] ~ s[2]，limit = 2則代表最後為基準準的state為s[2]
         idx = torch.arange(limit).unsqueeze(1) + torch.arange(offset[0], offset[1]).unsqueeze(0)
         idx = idx.clamp(max=len(s) - 1)
         # print(idx)
@@ -58,9 +61,9 @@ class Learner:
     def make_pred_s_tis(self, s_truth, s, a, h):
         total_loss = []
 
+        # get all starting hidden
         with torch.no_grad():
             start_time = time.time()
-            # get all starting hidden
             h_truth, h_cond = [h], [h]
             for x_truth, x_cond, a_lst in zip(s_truth, s, a):
                 x_truth, x_cond = x_truth.view(1, 1, -1), x_cond.view(1, 1, -1)
@@ -79,6 +82,7 @@ class Learner:
         h_truth = torch.cat(h_truth, dim=1)[:, :-1, :]
         h_cond = torch.cat(h_cond, dim=1)[:, :-1, :]
 
+        # 用所有states和對應的starting hidden產生對未來狀態的預測
         start_time = time.time()
         s_truth, s, a = s_truth.unsqueeze(0), s.unsqueeze(0), a.unsqueeze(0)
         kld_loss, nll_loss = 0, 0
@@ -100,7 +104,7 @@ class Learner:
         nll_loss = torch.mean(nll_loss, dim=1)
 
         # o_cond = torch.cat([o_cond, phi_z_cond], dim=-1)
-        empty_data = torch.zeros(1, 1, self.hidden_size).to(self.device) # for v_prime
+        empty_data = torch.zeros(1, 1, self.hidden_size).to(self.device) # for v_prime, placeholder for s_prime after terminal state
         o_cond = torch.cat([o_cond, empty_data], dim=1)
         # mu_out = torch.cat([mu_out, empty_data], dim=1)
         return kld_loss, nll_loss, o_cond, mse_loss
@@ -240,6 +244,7 @@ class Learner:
         return loss_log, f'{loss_log["total_loss"]:.9f}'
 
     def separated_learning(self, memory_list: list[Memory]):
+        # output的指標需要先加在keys中
         keys = [
             "pred_model_loss", "kld_loss", "nll_loss",
             "mse_loss",
@@ -285,6 +290,7 @@ class Learner:
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
                 first_hidden = memory_list[i].h0.detach().to(self.device)
 
+                # 這個階段不訓練pred_model，因此將pred_model預測的o_ti收集起來重複使用
                 with torch.no_grad():
                     _, _, o_ti, _ = self.cal_pred_model_loss(s, a_lst, first_hidden)
                     if len(pred_o_ti) < i + 1:
