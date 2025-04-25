@@ -1,5 +1,6 @@
 
 import torch
+import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
@@ -26,15 +27,36 @@ class Learner:
     hidden_size: int
     h0: list
 
-    def __init__(self, actor: Actor, config: Config, optim_pred_model=None, optim_policy=None, optimizer=None):
+    def __init__(self, config: Config):
         for key, value in vars(config).items():
             if key in self.__annotations__:
                 setattr(self, key, value)
 
-        self.actor = actor
-        self.optim_pred_model = optim_pred_model
-        self.optim_policy = optim_policy
-        self.optim = optimizer
+
+        self.actor = Actor(config)
+        self.actor.set_device(config.device)
+
+        self.optim_pred_model = optim.Adam(
+            [
+                {"params": self.actor.rnn.parameters()},
+                {"params": self.actor.pred_model.parameters()}
+            ],
+            lr=config.lr_pred_model
+        )
+        self.optim_policy = optim.Adam(
+            [
+                {"params": self.actor.policy.parameters()}
+            ],
+            lr=config.lr_policy
+        )
+        self.optim = optim.Adam(
+            [
+                {"params": self.actor.rnn.parameters()},
+                {"params": self.actor.policy.parameters()},
+                {"params": self.actor.pred_model.parameters()}
+            ],
+            lr=config.lr
+        )
 
     def make_batch(self, memory: Memory):
         s, a, prob_a, r, s_prime, done, t, a_lst = \

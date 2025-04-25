@@ -131,6 +131,11 @@ class Actor:
         self.pred_model = PredictiveModel(self.s_size, 1, self.hidden_size, self.s_size)
         self.policy = Policy(self.hidden_size, self.a_size)
 
+    def set_device(self, device: str):
+        self.rnn.to(device)
+        self.pred_model.to(device)
+        self.policy.to(device)
+
     def load_params(self, state_dict: list[dict]):
         self.rnn.load_state_dict(state_dict[0])
         self.pred_model.load_state_dict(state_dict[1])

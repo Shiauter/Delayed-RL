@@ -10,7 +10,7 @@ from actor_vrnn import Actor
 from learner_vrnn import Learner
 from util import Memory, merge_dict, check_dir_exist, action_data_sample
 from config import Config
-
+import pickle
 
 def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
     with torch.no_grad():
@@ -155,17 +155,19 @@ def worker(env_name, config: Config, conn):
         while True:
             cmd, data = conn.recv()
             if cmd == "reset":
-                s, _ = env.reset(seed=123)
+                s, _ = env.reset(seed=config.env_seed)
                 h_out = torch.zeros(config.h0).float()
                 copied_actions = action_data_sample[config.delay:]
                 a_lst = [i % 2 for i in range(config.delay)]
-                conn.send((s, a_lst, h_out))
+                done = False
+                conn.send((s, a_lst, h_out, done))
 
             elif cmd == "step":
                 h_in = h_out
                 a, prob, h_out, _ = data
                 prob = prob.view(-1)
-                a = 0 if len(copied_actions) == 0 else copied_actions[0][0]
+                a = a.item()
+                # a = 0 if len(copied_actions) == 0 else copied_actions[0][0]
                 a_lst.append(a)
 
                 delay_a = a_lst[0]
@@ -188,7 +190,7 @@ def worker(env_name, config: Config, conn):
                 a_lst.pop(0)
                 if len(copied_actions) > 0:
                     copied_actions.pop(0)
-                conn.send((s, a_lst, h_in, done))
+                conn.send((s, a_lst, h_out, done)) # check h_in or h_out
             elif cmd == "get_memo":
                 conn.send(memory)
             elif cmd == "close":
@@ -220,13 +222,13 @@ def event_loop(config: Config, actor: Actor):
             actions = []
             for obs in observations:
                 if obs is not None:
-                    s, a_lst, h_in = obs
+                    s, a_lst, h_in, done = obs
                     a, prob, h_out, _ = actor.sample_action(
                         torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
                         torch.tensor(a_lst).view(1, 1, -1),
                         h_in
                     )
-                    actions.append((a, prob, h_out, _))
+                    actions.append((a, prob, h_out, done))
                 else:
                     actions.append(None)
 
@@ -237,9 +239,8 @@ def event_loop(config: Config, actor: Actor):
             for i, conn in enumerate(parent_conns):
                 if active_envs[i]:
                     s, a_lst, h_in, done = conn.recv()
-                    observations[i] = (s, a_lst, h_in)
-                    if done:
-                        active_envs[i] = False
+                    active_envs[i] = False if done else True
+                    observations[i] = (s, a_lst, h_in, done)
                 else:
                     observations[i] = None
 
@@ -261,28 +262,7 @@ if __name__ == "__main__":
 
     config = Config(env_name="CartPole-v1")
     actor = Actor(config)
-    optim_pred_model = optim.Adam(
-        [
-            {"params": actor.rnn.parameters()},
-            {"params": actor.pred_model.parameters()}
-        ],
-        lr=config.lr_pred_model
-    )
-    optim_policy = optim.Adam(
-        [
-            {"params": actor.policy.parameters()}
-        ],
-        lr=config.lr_policy
-    )
-    optimizer = optim.Adam(
-        [
-            {"params": actor.rnn.parameters()},
-            {"params": actor.policy.parameters()},
-            {"params": actor.pred_model.parameters()}
-        ],
-        lr=config.lr
-    )
-    learner = Learner(config, optim_pred_model, optim_policy, optimizer)
+    learner = Learner(config)
     prev_loss_log = None
 
 
@@ -303,13 +283,14 @@ if __name__ == "__main__":
     print("=== Start ===\n")
     for ep in range(1, config.K_epoch_training + 1):
         print(f"* Epoch {ep}.")
-        print(f"> {'Collecting data...':<35}", end=" ")
+        print(f"> {'Collecting data...':<30}", end=" ")
 
-        model_state = actor.output_params()
-        learner.actor.load_params(model_state)
         memory_list = event_loop(config, actor)
         total_score = sum([memo.score for memo in memory_list])
         avg_score = total_score / config.num_memos
+        # if avg_score > 400:
+        #     with open("fixed_data.pkl", "wb") as f:
+        #         pickle.dump(memory_list, f)
         print(f"|| Avg score : {avg_score:.1f}")
 
         # print(f"> {'Training for policy...':<35}", end=" ")
@@ -319,13 +300,15 @@ if __name__ == "__main__":
         # print(f"> {'Training for predictive model...':<35}", end=" ")
         # pred_model_log, avg_loss_str = learner.learn_pred_model(memory_list)
         # print(f"|| Avg Loss  : {avg_loss_str}")
-
+        model_state = actor.output_params()
         if do_train:
-            print(f"> {'Training...':<35}", end=" ")
+            print(f"> {'Training...':<30}", end=" ")
+            learner.actor.load_params(model_state)
             loss_log, avg_loss_str = learner.separated_learning(memory_list)
             print(f"|| Avg Loss  : {avg_loss_str}")
             pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log)
             prev_loss_log = loss_log
+            actor.load_params(learner.actor.output_params())
 
         if do_save:
             print("-" * 65)
