@@ -86,8 +86,9 @@ class VAE(nn.Module):
 
         # store the logs of all the outputs and ground truth
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
-        nll_loss, mse = self._nll_gauss(dec_mean_t, dec_std_t, x)
-        return kld_loss, nll_loss, phi_x_t, phi_z_t, mse, dec_mean_t
+        nll_loss = self._nll_gauss(dec_mean_t, dec_std_t, x)
+        mse_loss = F.mse_loss(x, dec_mean_t)
+        return kld_loss, nll_loss, phi_x_t, phi_z_t, mse_loss, dec_mean_t
 
     def forward(self, s_t, a, h):
         # s = (batch, s_size)
@@ -126,8 +127,7 @@ class VAE(nn.Module):
         nll_loss = torch.sum(nll_element, dim=-1)
         pytorch_nll_loss_sum = F.gaussian_nll_loss(mean, x, var, reduction="sum")
         pytorch_nll_loss_mean = F.gaussian_nll_loss(mean, x, var)
-        pytorch_mse_loss = F.mse_loss(mean, x)
-        return nll_loss, pytorch_mse_loss
+        return nll_loss
 
     def _nll_gauss_old(self, mean, std, x):
         std = torch.clamp(std, min=EPS)
