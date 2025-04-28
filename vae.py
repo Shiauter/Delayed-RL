@@ -82,6 +82,7 @@ class VAE(nn.Module):
         prior_mean_t, prior_std_t = self.prior(s_t, h)
 
         dec_mean_t, dec_std_t = self.decode(phi_z_t, a, h)
+        pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
 
         # store the logs of all the outputs and ground truth
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
