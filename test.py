@@ -39,6 +39,7 @@ def eval(config: Config, model: Actor):
 
 if __name__ == "__main__":
     config = Config(env_name="CartPole-v1")
-    model = Actor(config)
-    model_state = torch.load("./models/test_vrnn_separated_learning10/epoch_300_action_delay.tar")
-    eval(config, model)
+    actor = Actor(config)
+    model_state = torch.load("YOUR MODEL DIRECTORY")
+    actor.load_params(model_state)
+    eval(config, actor)

@@ -3,3 +3,6 @@ logs/
 models/
 
 *.pkl
+*.tar
+
+debug.py

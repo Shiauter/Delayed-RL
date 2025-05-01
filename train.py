@@ -318,7 +318,7 @@ if __name__ == "__main__":
                 print(f"> Recording is saved in \"{record_path}\"")
 
             saved_path = f"{saved_folder}/epoch_{ep}_{config.model_name}"
-            torch.save(actor, saved_path)
+            torch.save(model_state, saved_path)
             print(f"> Model is saved in \"{saved_path}\"")
 
             try:
