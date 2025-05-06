@@ -26,7 +26,7 @@ class Config:
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
     eps_clip: float = 0.2
-    K_epoch_training: int = 500
+    K_epoch_training: int = 1
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
@@ -45,7 +45,7 @@ class Config:
     device: str = "cpu"
 
     # for debugging
-    do_save: bool = True
+    do_save: bool = False
     do_train: bool = True
 
     def __post_init__(self):
