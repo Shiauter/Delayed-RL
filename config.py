@@ -5,8 +5,7 @@ import torch
 
 @dataclass
 class Config:
-    env_name: str
-    env_seed: int = None
+    # S/L
     model_root: str = "./models"
     experiment_name = "debugging"
     model_name: str = "action_delay.tar"
@@ -16,29 +15,38 @@ class Config:
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
 
+    # env
+    env_name: str
+    env_seed: int = None
     s_size: int = field(init=False)
     a_size: int = field(init=False)
+    delay: int = 4
+    hidden_size: int = 32
+    h0: list = field(init=False)
+    T_horizon: int = 500
+
+    # policy
     gamma: float = 0.99
     lmbda: float = 0.95
     critic_weight: float = 0.9
     entropy_weight: float = 0.001
+    eps_clip: float = 0.2
+
+    # pred_model
+    p_iters: int = delay
+    z_size: int = 16
+
+    # training params
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    eps_clip: float = 0.2
     K_epoch_training: int = 1
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
-    delay: int = 4
-    p_iters: int = delay
     num_actors: int = 10
     num_memos: int = 1
-    T_horizon: int = 500
-    hidden_size: int = 32
-    z_size: int = hidden_size // 2
     batch_size: int = 50 # for predicting s_ti
-    h0: list = field(init=False)
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
     # device: str = "cuda" if torch.cuda.is_available() else "cpu" # bug: GPU is slower than CPU

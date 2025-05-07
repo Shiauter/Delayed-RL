@@ -133,10 +133,3 @@ class VAE(nn.Module):
         pytorch_nll_loss_sum = F.gaussian_nll_loss(mean, x, var, reduction="sum")
         pytorch_nll_loss_mean = F.gaussian_nll_loss(mean, x, var)
         return nll_loss
-
-    def _nll_gauss_old(self, mean, std, x):
-        std = torch.clamp(std, min=EPS)
-        log_std = torch.log(std)
-        sqr_term = (x - mean).pow(2) / (2 * (std.pow(2)))
-        nll_element = log_std + sqr_term + 0.5 * LOG_2PI
-        return torch.sum(nll_element, dim=-1)

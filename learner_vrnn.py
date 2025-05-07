@@ -10,24 +10,31 @@ from util import Memory
 from config import Config
 
 class Learner:
+    # env
     s_size: int
     a_size: int
+    delay: int
+    hidden_size: int
+    h0: list
+    T_horizon: int
+
+    # policy
     gamma: float
     lmbda: float
     critic_weight: float
     entropy_weight: float
     eps_clip: float
+
+    # pred_model
+    p_iters: int
+    z_size: int
+
+    # training params
+    num_memos: int
+    num_actors: int
     K_epoch_policy: int
     K_epoch_pred_model: int
     K_epoch_learn: int
-    delay: int
-    p_iters: int
-    num_memos: int
-    num_actors: int
-    T_horizon: int
-    hidden_size: int
-    z_size: int
-    h0: list
     epoch_tier: list
     lr_tier: list
     device: str
@@ -128,41 +135,6 @@ class Learner:
         # mu_out = torch.cat([mu_out, empty_data], dim=1)
         return kld_loss, nll_loss, o_cond, mse_loss
 
-    def make_pred_s_tis_old(self, s_truth, s, a, h):
-        # total_kld_loss, total_nll_loss = [], []
-        # # print(s_truth.shape, s.shape, h.shape, a.shape)
-        # h_truth, h_cond = h, h
-        # o_ti = []
-        # for x_truth, x_cond, a_lst in zip(s_truth, s, a):
-        #     # print(x_truth.shape, x_cond.shape, a_lst.shape)
-        #     iter_kld_loss, iter_nll_loss = [], []
-        #     a_lst = torch.split(a_lst, 1, dim=-1)
-        #     x_truth, x_cond = x_truth.view(1, 1, -1), x_cond.view(1, 1, -1)
-        #     for i in range(self.p_iters):
-        #         # print(x_truth.shape, x_cond.shape, h_truth.shape, h_cond.shape, a_lst[i].shape)
-        #         kld_loss, nll_loss, phi_x_truth, phi_z_truth = self.actor.pred_model.reconstruct(x_truth, x_cond, a_lst[i].view(1, 1, -1), h_truth)
-        #         rnn_in_truth = torch.cat([phi_x_truth, phi_z_truth], dim=-1).view(1, 1, -1)
-        #         o_truth, h_truth = self.actor.rnn(rnn_in_truth, h_truth)
-        #         # h要維持第一個
-
-        #         # pred_x, phi_x_cond, phi_z_cond = self.actor.pred_model()
-        #         # rnn_in_cond = torch.cat([phi_x_cond, phi_z_cond], dim=-1).view(1, 1, -1)
-        #         # o_cond, h_cond  = self.actor.rnn(rnn_in_cond, h_cond)
-
-        #         iter_kld_loss.append(kld_loss)
-        #         iter_nll_loss.append(nll_loss)
-
-        #     total_kld_loss.append(torch.stack(iter_kld_loss))
-        #     total_nll_loss.append(torch.stack(iter_nll_loss))
-        #     o_ti.append(o_truth)
-        # total_kld_loss = torch.stack(total_kld_loss).mean(dim=1).mean(dim=0)
-        # total_nll_loss = torch.stack(total_nll_loss).mean(dim=1).mean(dim=0)
-
-        # o_ti.append(torch.zeros_like(o_truth)) # for v_prime
-        # o_ti = torch.cat(o_ti, dim=1)[-1].unsqueeze(0)
-        # return total_kld_loss, total_nll_loss, o_ti
-        pass
-
     def cal_advantage(self, v_s, r, v_prime, done_mask):
         td_target = r + self.gamma * v_prime * done_mask
         delta = td_target - v_s
@@ -189,7 +161,6 @@ class Learner:
             limit = len(s) - self.actor.delay
             s_truth = self.make_offset_seq(s, (1, self.actor.delay + 1), limit)
             kld_loss, nll_loss, o_ti, mse_loss = self.make_pred_s_tis(s_truth, s[:limit], a_lst[:limit], first_hidden)
-            # kld_loss, nll_loss, o_ti = self.make_pred_s_tis_old(s_truth, s[:limit], a_lst[:limit], first_hidden)
             # print(f"nll: {nll_loss}, kld: {kld_loss}")
         return kld_loss, nll_loss, o_ti, mse_loss
 
@@ -375,14 +346,3 @@ class Learner:
     def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv):
         if pred_model_tier >= 2: return 0
         else: return 2
-
-        kld = abs(kld)
-        if kld > 0.09:
-            return 4
-        if kld > 0.06:
-            return 3
-        if kld > 0.04:
-            return 2
-        if kld > 0.01:
-            return 1
-        return 0
