@@ -7,13 +7,15 @@ EPS = 1e-6
 LOG_2PI = math.log(2 * math.pi)
 
 class VAE(nn.Module):
-    def __init__(self, x_dim, z_dim, a_dim, h_dim):
+    def __init__(self, x_dim, z_dim, a_dim, h_dim, pred_s_source: str, nll_include_const: bool):
         super().__init__()
 
         self.x_dim = x_dim
         self.z_dim = z_dim
         self.a_dim = a_dim
         self.h_dim = h_dim
+        self.pred_s_source = pred_s_source
+        self.nll_include_const = nll_include_const
 
         self.phi_x = nn.Sequential(
             nn.Linear(x_dim, h_dim),
@@ -82,8 +84,8 @@ class VAE(nn.Module):
         prior_mean_t, prior_std_t = self.prior(s_t, h)
 
         dec_mean_t, dec_std_t = self.decode(phi_z_t, a, h)
-        pred_s = dec_mean_t
-        # pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
+        if self.pred_s_source == "dec_mean_t": pred_s = dec_mean_t
+        elif self.pred_s_source == "sampled_s": pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
 
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
         nll_loss = self._nll_gauss(dec_mean_t, dec_std_t, x, include_const=True)
@@ -104,8 +106,8 @@ class VAE(nn.Module):
         # print("phi_z_t ->", phi_z_t.shape)
         # print("dec in ->", torch.cat([phi_z_t, a, h], dim=-1).shape)
         dec_mean_t, dec_std_t = self.decode(phi_z_t, a, h)
-        pred_s = dec_mean_t
-        # pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
+        if self.pred_s_source == "dec_mean_t": pred_s = dec_mean_t
+        elif self.pred_s_source == "sampled_s": pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
 
         # print("dec_mean_t ->", dec_mean_t.shape)
         phi_x_t = self.phi_x(dec_mean_t)
@@ -122,10 +124,10 @@ class VAE(nn.Module):
             (std_1.pow(2) + (mean_1 - mean_2).pow(2)) / (std_2.pow(2) + EPS) - 1) * 0.5
         return	torch.sum(kld_element, dim=-1)
 
-    def _nll_gauss(self, mean, std, x, include_const=True):
+    def _nll_gauss(self, mean, std, x):
         std = torch.clamp(std, min=EPS)
         var = std.pow(2)
-        constant = 2 * torch.pi if include_const else 1
+        constant = 2 * torch.pi if self.nll_include_const else 1
         log_term = torch.log(var * constant)
         sqr_term = (x - mean).pow(2) / var
         nll_element = (log_term + sqr_term) / 2

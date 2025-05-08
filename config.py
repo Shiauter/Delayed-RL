@@ -5,22 +5,12 @@ import torch
 
 @dataclass
 class Config:
-    # S/L
-    model_root: str = "./models"
-    experiment_name = "debugging"
-    model_name: str = "action_delay.tar"
-    log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/{experiment_name}"
-    saved_folder = f"{model_root}/{experiment_name}"
-    record_dir =f"{saved_folder}/records"
-    record_interval: int = 10 # every n epoch
-
     # env
     env_name: str
     env_seed: int = None
     s_size: int = field(init=False)
     a_size: int = field(init=False)
-    delay: int = 4
+    delay: int = 1
     hidden_size: int = 32
     h0: list = field(init=False)
     T_horizon: int = 500
@@ -35,6 +25,9 @@ class Config:
     # pred_model
     p_iters: int = delay
     z_size: int = 16
+    reconst_loss_method: str = "NLL" # NLL, MSE
+    pred_s_source: str = "sampled_s" # sampled_s, dec_mean_t
+    nll_include_const: bool = True # only for nll
 
     # training params
     lr_pred_model: float = field(init=False)
@@ -49,12 +42,20 @@ class Config:
     batch_size: int = 50 # for predicting s_ti
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
-    # device: str = "cuda" if torch.cuda.is_available() else "cpu" # bug: GPU is slower than CPU
-    device: str = "cpu"
-
-    # for debugging
-    do_save: bool = False
+    device: str = "cpu" # bug: GPU is slower than CPU
+    do_save: bool = True
     do_train: bool = True
+
+    # S/L
+    model_root: str = "./models"
+    experiment_name = "debugging"
+    model_name: str = "action_delay.tar"
+    log_root: str = "./logs" # used in tensorboard
+    log_dir = f"{log_root}/{experiment_name}"
+    saved_folder = f"{model_root}/{experiment_name}"
+    record_dir =f"{saved_folder}/records"
+    record_interval: int = 10 # every n epoch
+
 
     def __post_init__(self):
         env = gym.make(self.env_name)

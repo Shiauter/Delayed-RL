@@ -28,6 +28,7 @@ class Learner:
     # pred_model
     p_iters: int
     z_size: int
+    reconst_loss_method: str
 
     # training params
     num_memos: int
@@ -257,7 +258,10 @@ class Learner:
                 first_hidden = memory_list[i].h0.detach().to(self.device)
 
                 kld_loss, nll_loss, o_ti, mse_loss = self.cal_pred_model_loss(s, a_lst, first_hidden)
-                total_pred_model_loss.append(kld_loss + nll_loss)
+                if self.reconst_loss_method == "NLL":
+                    total_pred_model_loss.append(kld_loss + nll_loss)
+                elif self.reconst_loss_method == "MSE":
+                    total_pred_model_loss.append(kld_loss + mse_loss)
 
                 loss_log["kld_loss"].append(kld_loss)
                 loss_log["nll_loss"].append(nll_loss)

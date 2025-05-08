@@ -51,7 +51,7 @@ class Actor:
                 setattr(self, key, value)
 
         self.pred_model = VAE(
-            self.s_size, self.z_size, 1, self.hidden_size
+            self.s_size, self.z_size, 1, self.hidden_size, config.pred_s_source, config.nll_include_const
         )
         self.rnn = RNN(self.s_size + self.z_size, 64, self.hidden_size)
         self.policy = Policy(self.hidden_size, self.a_size)
