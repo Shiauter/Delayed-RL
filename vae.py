@@ -7,7 +7,7 @@ EPS = 1e-6
 LOG_2PI = math.log(2 * math.pi)
 
 class VAE(nn.Module):
-    def __init__(self, x_dim, z_dim, a_dim, h_dim, pred_s_source: str, nll_include_const: bool):
+    def __init__(self, x_dim, z_dim, a_dim, h_dim, pred_s_source: str, nll_include_const: bool, set_std_to_1: bool):
         super().__init__()
 
         self.x_dim = x_dim
@@ -16,6 +16,7 @@ class VAE(nn.Module):
         self.h_dim = h_dim
         self.pred_s_source = pred_s_source
         self.nll_include_const = nll_include_const
+        self.set_std_to_1 = set_std_to_1
 
         self.phi_x = nn.Sequential(
             nn.Linear(x_dim, h_dim),
@@ -61,18 +62,24 @@ class VAE(nn.Module):
         enc_t = self.enc_net(torch.cat(args, dim=-1))
         enc_mean_t, enc_std_t = self.enc_mean(enc_t), self.enc_std(enc_t)
         enc_std_t = torch.clamp(F.softplus(enc_std_t), min=EPS)
+        if self.set_std_to_1:
+            enc_std_t = torch.ones_like(enc_std_t)
         return enc_mean_t, enc_std_t
 
     def decode(self, *args):
         dec_t = self.dec_net(torch.cat(args, dim=-1))
         dec_mean_t, dec_std_t = self.dec_mean(dec_t), self.dec_std(dec_t)
         dec_std_t = torch.clamp(F.softplus(dec_std_t), min=EPS)
+        if self.set_std_to_1:
+            dec_std_t = torch.ones_like(dec_std_t)
         return dec_mean_t, dec_std_t
 
     def prior(self, *args):
         prior_t = self.prior_net(torch.cat(args, dim=-1))
         prior_mean_t, prior_std_t = self.prior_mean(prior_t), self.prior_std(prior_t)
         prior_std_t = torch.clamp(F.softplus(prior_std_t), min=EPS)
+        if self.set_std_to_1:
+            prior_std_t = torch.ones_like(prior_std_t)
         return prior_mean_t, prior_std_t
 
     # for training
@@ -88,7 +95,7 @@ class VAE(nn.Module):
         elif self.pred_s_source == "sampled_s": pred_s = self._reparameterized_sample(dec_mean_t, dec_std_t)
 
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
-        nll_loss = self._nll_gauss(dec_mean_t, dec_std_t, x, include_const=True)
+        nll_loss = self._nll_gauss(dec_mean_t, dec_std_t, x)
         mse_loss = torch.pow(x - dec_mean_t, 2).sum(dim=-1)
         # mse_loss = F.mse_loss(x, dec_mean_t)
         return kld_loss, nll_loss, phi_x_t, phi_z_t, mse_loss, pred_s

@@ -28,12 +28,14 @@ class Config:
     reconst_loss_method: str = "NLL" # NLL, MSE
     pred_s_source: str = "sampled_s" # sampled_s, dec_mean_t
     nll_include_const: bool = True # only for nll
+    pause_update_ep: int = 100
+    set_std_to_1: bool = False
 
     # training params
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    K_epoch_training: int = 1
+    K_epoch_training: int = 500
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
@@ -48,10 +50,10 @@ class Config:
 
     # S/L
     model_root: str = "./models"
-    experiment_name = "debugging"
+    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_only_policy_loss"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/{experiment_name}"
+    log_dir = f"{log_root}/testing_ppo_loss/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch

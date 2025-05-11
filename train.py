@@ -304,7 +304,7 @@ if __name__ == "__main__":
         if do_train:
             print(f"> {'Training...':<30}", end=" ")
             learner.actor.load_params(model_state)
-            loss_log, avg_loss_str = learner.separated_learning(memory_list)
+            loss_log, avg_loss_str = learner.separated_learning(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
             pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log)
             prev_loss_log = loss_log

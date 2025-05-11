@@ -29,6 +29,7 @@ class Learner:
     p_iters: int
     z_size: int
     reconst_loss_method: str
+    pause_update_ep: int
 
     # training params
     num_memos: int
@@ -177,6 +178,16 @@ class Learner:
         surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
         policy_loss = -torch.min(surr1, surr2).mean() # expected value
 
+        clipped_mask = (ratio < 1 - self.eps_clip) | (ratio > 1 + self.eps_clip)
+        num_clipped = clipped_mask.sum()
+        cliped_percentage = num_clipped / ratio.shape[0]
+        clipped_ratio = ratio[clipped_mask]
+        clipped_distances = torch.maximum(
+            clipped_ratio - (1 + self.eps_clip),
+            (1 - self.eps_clip) - clipped_ratio
+        ).abs()
+        avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
+
         critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
 
         entropy = Categorical(pi).entropy().mean()
@@ -185,7 +196,7 @@ class Learner:
         kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
         advtg_mean = advantage.mean(dim=-1)
 
-        return policy_loss, critic_loss, entropy_bonus, kl_div, advtg_mean
+        return policy_loss, critic_loss, entropy_bonus, kl_div, advtg_mean, cliped_percentage, avg_clipped_distance
 
     def learn(self, memory_list: list[Memory]):
         keys = ["total_loss", "pred_model_loss", "ppo_loss",
@@ -235,20 +246,22 @@ class Learner:
                 print(err, k)
         return loss_log, f'{loss_log["total_loss"]:.9f}'
 
-    def separated_learning(self, memory_list: list[Memory]):
+    def separated_learning(self, memory_list: list[Memory], current_episode: int):
         # output的指標需要先加在keys中
         keys = [
             "pred_model_loss", "kld_loss", "nll_loss",
             "mse_loss",
 
             "ppo_loss", "policy_loss", "critic_loss",
-            "entropy_bonus", "kld_policy", "advtg_mean"
+            "entropy_bonus", "kld_policy", "advtg_mean",
+            "clipped_percentage", "avg_clipped_distance"
         ]
 
         loss_log = {}
         for k in keys:
             loss_log[k] = []
 
+        # pred_model
         start_time = time.time()
         for epoch in range(self.K_epoch_pred_model):
             total_pred_model_loss = []
@@ -272,11 +285,13 @@ class Learner:
             loss_log["pred_model_loss"].append(total_pred_model_loss)
             # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
 
-            self.optim_pred_model.zero_grad()
-            total_pred_model_loss.mean().backward()
-            self.optim_pred_model.step()
+            if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
+                self.optim_pred_model.zero_grad()
+                total_pred_model_loss.mean().backward()
+                self.optim_pred_model.step()
         # print(f"--- {time.time() - start_time} seconds for pred_model training ---")
 
+        # policy
         start_time = time.time()
         for epoch in range(self.K_epoch_policy):
             total_ppo_loss = 0
@@ -289,8 +304,9 @@ class Learner:
 
                 # print(f"--- {time.time() - start_loss_time} seconds for pred_model loss in policy training ---")
                 start_loss_time = time.time()
-                policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
-                ppo_loss = policy_loss + critic_loss + entropy_bonus
+                policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, clipped_percentage, avg_clipped_distance = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
+                # ppo_loss = policy_loss + critic_loss + entropy_bonus
+                ppo_loss = policy_loss
                 total_ppo_loss += ppo_loss
 
                 loss_log["policy_loss"].append(policy_loss.mean())
@@ -298,6 +314,8 @@ class Learner:
                 loss_log["entropy_bonus"].append(entropy_bonus.mean())
                 loss_log["kld_policy"].append(kld_policy.mean())
                 loss_log["advtg_mean"].append(advtg_mean.mean())
+                loss_log["clipped_percentage"].append(clipped_percentage.mean())
+                loss_log["avg_clipped_distance"].append(avg_clipped_distance.mean())
                 # print(f"--- {time.time() - start_loss_time} seconds for policy loss ---")
 
             total_ppo_loss /= self.num_memos
