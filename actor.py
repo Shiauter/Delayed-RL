@@ -136,17 +136,17 @@ class Actor:
         self.pred_model.to(device)
         self.policy.to(device)
 
-    def load_params(self, state_dict: list[dict]):
-        self.rnn.load_state_dict(state_dict[0])
-        self.pred_model.load_state_dict(state_dict[1])
-        self.policy.load_state_dict(state_dict[2])
+    def load_params(self, state_dict: dict):
+        self.rnn.load_state_dict(state_dict["rnn"])
+        self.pred_model.load_state_dict(state_dict["pred_model"])
+        self.policy.load_state_dict(state_dict["policy"])
 
     def output_params(self):
-        return [
-            self.rnn.state_dict(),
-            self.pred_model.state_dict(),
-            self.policy.state_dict()
-        ]
+        return {
+            "rnn": self.rnn.state_dict(),
+            "pred_model": self.pred_model.state_dict(),
+            "policy": self.policy.state_dict()
+        }
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out, pred_s = self.pred_present(s, a_lst, h_in, self.p_iters)

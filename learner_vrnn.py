@@ -306,7 +306,7 @@ class Learner:
                 start_loss_time = time.time()
                 policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, clipped_percentage, avg_clipped_distance = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
                 # ppo_loss = policy_loss + critic_loss + entropy_bonus
-                ppo_loss = policy_loss
+                ppo_loss = entropy_bonus
                 total_ppo_loss += ppo_loss
 
                 loss_log["policy_loss"].append(policy_loss.mean())

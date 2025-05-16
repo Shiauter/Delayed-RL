@@ -22,7 +22,8 @@ pip install -r requirements.txt
 # 訓練
 
 ```
-python train.py
+python train.py # lstm ppo
+python train_vrnn.py # vrnn ppo
 ```
 
 > 訓練好的log會儲存在"logs"資料夾中，模型和錄影會記錄在"models"資料夾中，

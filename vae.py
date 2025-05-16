@@ -96,8 +96,8 @@ class VAE(nn.Module):
 
         kld_loss = self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
         nll_loss = self._nll_gauss(dec_mean_t, dec_std_t, x)
-        mse_loss = torch.pow(x - dec_mean_t, 2).sum(dim=-1)
-        # mse_loss = F.mse_loss(x, dec_mean_t)
+        # mse_loss = torch.pow(x - dec_mean_t, 2).sum(dim=-1)
+        mse_loss = F.mse_loss(x, dec_mean_t)
         return kld_loss, nll_loss, phi_x_t, phi_z_t, mse_loss, pred_s
 
     def forward(self, s_t, a, h):

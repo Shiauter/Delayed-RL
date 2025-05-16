@@ -35,12 +35,12 @@ class Config:
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    K_epoch_training: int = 500
+    K_epoch_training: int = 300
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
     num_actors: int = 10
-    num_memos: int = 1
+    num_memos: int = 5
     batch_size: int = 50 # for predicting s_ti
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
@@ -50,10 +50,11 @@ class Config:
 
     # S/L
     model_root: str = "./models"
-    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_only_policy_loss"
+    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_only_entropy_bonus"
+    # experiment_name = f"CartPole_lstm_ppo"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/testing_ppo_loss/{experiment_name}"
+    log_dir = f"{log_root}/testing_ppo_loss_num_memo_5/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
