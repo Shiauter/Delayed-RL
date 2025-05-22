@@ -201,7 +201,7 @@ class Learner:
 
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-                policy_loss = torch.min(surr1, surr2).mean() # expected value
+                policy_loss = -torch.min(surr1, surr2).mean() # expected value
 
                 critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
 
@@ -210,9 +210,9 @@ class Learner:
                 # self.actor.dist.set_probs(pi)
                 # entropy = self.actor.dist.entropy().mean()
                 entropy = Categorical(pi).entropy().mean()
-                entropy_bonus = self.entropy_weight * entropy
+                entropy_bonus = -self.entropy_weight * entropy
 
-                loss = - policy_loss + critic_loss - entropy_bonus
+                loss = policy_loss + critic_loss + entropy_bonus
                 ppo_loss += loss
                 loss_log["policy_loss"].append(policy_loss.mean())
                 loss_log["critic_loss"].append(critic_loss.mean())
