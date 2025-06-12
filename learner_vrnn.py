@@ -48,6 +48,18 @@ class Learner:
 
         self.actor = Actor(config)
         self.actor.set_device(config.device)
+        # for param in self.actor.policy.fc_pi.parameters():
+        #     param.requires_grad = False
+        # for param in self.actor.pred_model.parameters():
+        #     param.requires_grad = False
+        # for param in self.actor.rnn.parameters():
+        #     param.requires_grad = False
+        # self.optim_critic = optim.Adam(
+        #     [
+        #         {"params": self.actor.policy.fc_v.parameters()}
+        #     ],
+        #     lr=config.lr_pred_model
+        # )
 
         self.optim_pred_model = optim.Adam(
             [
@@ -132,10 +144,14 @@ class Learner:
         mse_loss = torch.stack(mse_loss, dim=0).sum(dim=0).mean()
 
         # o_cond = torch.cat([o_cond, phi_z_cond], dim=-1)
-        empty_data = torch.zeros(1, 1, self.hidden_size).to(self.device) # for v_prime, placeholder for s_prime after terminal state
-        o_cond = torch.cat([o_cond, empty_data], dim=1)
+        empty_o = torch.zeros(1, 1, self.hidden_size).to(self.device) # for v_prime, placeholder for s_prime after terminal state
+        o_cond = torch.cat([o_cond, empty_o], dim=1)
+        empty_s = torch.zeros(1, self.s_size).to(self.device)
+        pred_s = torch.cat([pred_s.squeeze(0), empty_s], dim=0)
+        empty_z = torch.zeros(1, self.z_size).to(self.device)
+        phi_z_cond = torch.cat([phi_z_cond, empty_z], dim=1)
         # mu_out = torch.cat([mu_out, empty_data], dim=1)
-        return kld_loss, nll_loss, o_cond, mse_loss
+        return kld_loss, nll_loss, o_cond, mse_loss, pred_s
 
     def cal_advantage(self, v_s, r, v_prime, done_mask):
         td_target = r + self.gamma * v_prime * done_mask
@@ -148,13 +164,15 @@ class Learner:
             advtg_lst.append([advtg_t])
         advtg_lst.reverse()
         advantage = torch.tensor(advtg_lst, dtype=torch.float).to(self.device)
+        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
         return_target = advantage + v_s
         return advantage, return_target
 
-    def make_pi_and_critic(self, o):
+    def make_pi_and_critic(self, o, s):
         second_hidden = o[0].unsqueeze(0)
-        pi = self.actor.policy.pi(o)
-        v = self.actor.policy.v(o)
+        s = s.unsqueeze(0)
+        pi = self.actor.policy.pi(o, s)
+        v = self.actor.policy.v(o, s)
         pi, v = pi.squeeze(0), v.squeeze(0)
         return pi, v, second_hidden.detach()
 
@@ -162,13 +180,16 @@ class Learner:
         if self.p_iters > 0:
             limit = len(s) - self.actor.delay
             s_truth = self.make_offset_seq(s, (1, self.actor.delay + 1), limit)
-            kld_loss, nll_loss, o_ti, mse_loss = self.make_pred_s_tis(s_truth, s[:limit], a_lst[:limit], first_hidden)
+            kld_loss, nll_loss, o_ti, mse_loss, pred_s = self.make_pred_s_tis(s_truth, s[:limit], a_lst[:limit], first_hidden)
             # print(f"nll: {nll_loss}, kld: {kld_loss}")
-        return kld_loss, nll_loss, o_ti, mse_loss
+        return kld_loss, nll_loss, o_ti, mse_loss, pred_s
 
-    def cal_ppo_loss(self, o_ti, a, prob_a, r, done):
-        pi, v_s, _ = self.make_pi_and_critic(o_ti[:, :-1, :])
-        _ , v_prime, _ = self.make_pi_and_critic(o_ti[:, 1:, :])
+    def cal_ppo_loss(self, o_ti, a, prob_a, r, done, s):
+        empty_data = torch.zeros(1, self.s_size).to(self.device)
+        s_prime = torch.cat([s, empty_data], dim=0)[1:]
+
+        pi, v_s, _ = self.make_pi_and_critic(o_ti[:, :-1, :], s[:-self.delay, :])
+        _ , v_prime, _ = self.make_pi_and_critic(o_ti[:, 1:, :], s_prime[:-self.delay, :])
         advantage, return_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
 
         pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
@@ -194,9 +215,16 @@ class Learner:
         entropy_bonus = -self.entropy_weight * entropy
 
         kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
-        advtg_mean = advantage.mean(dim=-1)
+        advtg_mean = advantage.mean()
+        advtg_std = advantage.std()
+        advtg_min, advtg_max = advantage.min(), advantage.max()
 
-        return policy_loss, critic_loss, entropy_bonus, kl_div, advtg_mean, cliped_percentage, avg_clipped_distance
+        v_s_mean = v_s.mean()
+        td_target_mean = return_target.mean()
+
+        return policy_loss, critic_loss, entropy_bonus, kl_div, \
+            advtg_mean, cliped_percentage, avg_clipped_distance, \
+            advtg_std, advtg_min, advtg_max, v_s_mean, td_target_mean
 
     def learn(self, memory_list: list[Memory]):
         keys = ["total_loss", "pred_model_loss", "ppo_loss",
@@ -254,7 +282,9 @@ class Learner:
 
             "ppo_loss", "policy_loss", "critic_loss",
             "entropy_bonus", "kld_policy", "advtg_mean",
-            "clipped_percentage", "avg_clipped_distance"
+            "clipped_percentage", "avg_clipped_distance",
+            "advtg_std", "advtg_min", "advtg_max", "v_s_mean",
+            "td_target_mean"
         ]
 
         loss_log = {}
@@ -270,7 +300,7 @@ class Learner:
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
                 first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                kld_loss, nll_loss, o_ti, mse_loss = self.cal_pred_model_loss(s, a_lst, first_hidden)
+                kld_loss, nll_loss, o_ti, mse_loss, _ = self.cal_pred_model_loss(s, a_lst, first_hidden)
                 if self.reconst_loss_method == "NLL":
                     total_pred_model_loss.append(kld_loss + nll_loss)
                 elif self.reconst_loss_method == "MSE":
@@ -285,10 +315,10 @@ class Learner:
             loss_log["pred_model_loss"].append(total_pred_model_loss)
             # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
 
-            if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
-                self.optim_pred_model.zero_grad()
-                total_pred_model_loss.mean().backward()
-                self.optim_pred_model.step()
+            # if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
+            #     self.optim_pred_model.zero_grad()
+            #     total_pred_model_loss.mean().backward()
+            #     self.optim_pred_model.step()
         # print(f"--- {time.time() - start_time} seconds for pred_model training ---")
 
         # policy
@@ -300,22 +330,30 @@ class Learner:
                 s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
                 first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                _, _, o_ti, _ = self.cal_pred_model_loss(s, a_lst, first_hidden)
+                _, _, o_ti, _, pred_s = self.cal_pred_model_loss(s, a_lst, first_hidden)
 
                 # print(f"--- {time.time() - start_loss_time} seconds for pred_model loss in policy training ---")
                 start_loss_time = time.time()
-                policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, clipped_percentage, avg_clipped_distance = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
-                # ppo_loss = policy_loss + critic_loss + entropy_bonus
-                ppo_loss = entropy_bonus
+                policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
+                clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
+                v_s_mean, td_target_mean = \
+                    self.cal_ppo_loss(o_ti, a, prob_a, r, done, s)
+                ppo_loss = policy_loss + critic_loss + entropy_bonus
+                # ppo_loss = critic_loss
                 total_ppo_loss += ppo_loss
 
-                loss_log["policy_loss"].append(policy_loss.mean())
-                loss_log["critic_loss"].append(critic_loss.mean())
-                loss_log["entropy_bonus"].append(entropy_bonus.mean())
-                loss_log["kld_policy"].append(kld_policy.mean())
-                loss_log["advtg_mean"].append(advtg_mean.mean())
-                loss_log["clipped_percentage"].append(clipped_percentage.mean())
-                loss_log["avg_clipped_distance"].append(avg_clipped_distance.mean())
+                loss_log["policy_loss"].append(policy_loss)
+                loss_log["critic_loss"].append(critic_loss)
+                loss_log["entropy_bonus"].append(entropy_bonus)
+                loss_log["kld_policy"].append(kld_policy)
+                loss_log["advtg_mean"].append(advtg_mean)
+                loss_log["clipped_percentage"].append(clipped_percentage)
+                loss_log["avg_clipped_distance"].append(avg_clipped_distance)
+                loss_log["advtg_std"].append(advtg_std)
+                loss_log["advtg_min"].append(advtg_min)
+                loss_log["advtg_max"].append(advtg_max)
+                loss_log["v_s_mean"].append(v_s_mean)
+                loss_log["td_target_mean"].append(td_target_mean)
                 # print(f"--- {time.time() - start_loss_time} seconds for policy loss ---")
 
             total_ppo_loss /= self.num_memos
@@ -325,6 +363,9 @@ class Learner:
             self.optim_policy.zero_grad()
             total_ppo_loss.mean().backward()
             self.optim_policy.step()
+            # self.optim_critic.zero_grad()
+            # total_ppo_loss.mean().backward()
+            # self.optim_critic.step()
         # print(f"--- {time.time() - start_time} seconds for policy training ---")
 
         for k in loss_log.keys():
@@ -346,7 +387,7 @@ class Learner:
 
         pred_model_tier = self._cal_pred_model_param_tier(kld, nll)
         policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean)
-        self.K_epoch_pred_model, self.K_epoch_policy = self.epoch_tier[pred_model_tier], self.epoch_tier[policy_tier]
+        self.K_epoch_pred_model, self.K_epoch_policy = self.epoch_tier[pred_model_tier] + 5, self.epoch_tier[policy_tier] + 5
         for param_group in self.optim_pred_model.param_groups:
             param_group['lr'] = self.lr_tier[pred_model_tier]
         for param_group in self.optim_policy.param_groups:

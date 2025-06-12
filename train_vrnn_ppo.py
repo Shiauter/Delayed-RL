@@ -26,7 +26,7 @@ def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
 
         while not done:
             h_in = h_out
-            a, _, h_out, _ = model.sample_action(
+            a, _, h_out, _, _ = model.sample_action(
                 torch.from_numpy(s).view(1, 1, -1),
                 torch.tensor(a_lst).view(1, 1, -1),
                 h_in
@@ -86,7 +86,7 @@ def worker(env_name, config: Config, conn):
                     "states": s.tolist(),
                     "actions": [delay_a],
                     "probs": [prob[a].item()],
-                    "rewards": [r / 100.0],
+                    "rewards": [r / 1.0],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
                     "a_lsts": a_lst[:-1]
@@ -132,7 +132,7 @@ def event_loop(config: Config, actor: Actor):
             for obs in observations:
                 if obs is not None:
                     s, a_lst, h_in, done = obs
-                    a, prob, h_out, _ = actor.sample_action(
+                    a, prob, h_out, _, _ = actor.sample_action(
                         torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
                         torch.tensor(a_lst).view(1, 1, -1),
                         h_in

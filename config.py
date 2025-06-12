@@ -19,42 +19,42 @@ class Config:
     gamma: float = 0.99
     lmbda: float = 0.95
     critic_weight: float = 0.9
-    entropy_weight: float = 0.001
+    entropy_weight: float = 0.01
     eps_clip: float = 0.2
 
     # pred_model
     p_iters: int = delay
     z_size: int = 16
     reconst_loss_method: str = "NLL" # NLL, MSE
-    pred_s_source: str = "sampled_s" # sampled_s, dec_mean_t
+    pred_s_source: str = "dec_mean_t" # sampled_s, dec_mean_t
     nll_include_const: bool = True # only for nll
-    pause_update_ep: int = 100
+    pause_update_ep: int = None
     set_std_to_1: bool = False
 
     # training params
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    K_epoch_training: int = 300
+    K_epoch_training: int = 1
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
     num_actors: int = 10
-    num_memos: int = 5
+    num_memos: int = 1
     batch_size: int = 50 # for predicting s_ti
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
     device: str = "cpu" # bug: GPU is slower than CPU
-    do_save: bool = True
+    do_save: bool = False
     do_train: bool = True
 
     # S/L
     model_root: str = "./models"
-    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_only_entropy_bonus"
+    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}"
     # experiment_name = f"CartPole_lstm_ppo"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/testing_ppo_loss_num_memo_5/{experiment_name}"
+    log_dir = f"{log_root}/raw_state_concatenate_o_t_take_3/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch

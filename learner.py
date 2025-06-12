@@ -232,8 +232,11 @@ class Learner:
         return loss_log, f'{loss_log["ppo_loss"]:.9f}'
 
     def learn(self, memory_list: list[Memory]):
-        keys = ["total_loss", "pred_model_loss", "ppo_loss",
-                "policy_loss", "critic_loss", "entropy_bonus"]
+        keys = ["total_loss", "pred_model_loss",
+
+                "ppo_loss", "policy_loss", "critic_loss",
+                "entropy_bonus", "kld_policy", "advtg_mean",
+                "clipped_percentage", "avg_clipped_distance"]
         loss_log = {}
         for k in keys:
             loss_log[k] = []
@@ -264,20 +267,37 @@ class Learner:
 
                 surr1 = ratio * advantage
                 surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
-                policy_loss = torch.min(surr1, surr2).mean() # expected value
+                policy_loss = -torch.min(surr1, surr2).mean() # expected value
+
+                clipped_mask = (ratio < 1 - self.eps_clip) | (ratio > 1 + self.eps_clip)
+                num_clipped = clipped_mask.sum()
+                clipped_percentage = num_clipped / ratio.shape[0]
+                clipped_ratio = ratio[clipped_mask]
+                clipped_distances = torch.maximum(
+                    clipped_ratio - (1 + self.eps_clip),
+                    (1 - self.eps_clip) - clipped_ratio
+                ).abs()
+                avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
                 critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
 
                 entropy = Categorical(pi).entropy().mean()
-                entropy_bonus = self.entropy_weight * entropy
+                entropy_bonus = -self.entropy_weight * entropy
 
-                ppo_loss = - policy_loss + critic_loss - entropy_bonus
+                kld_policy = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
+                advtg_mean = advantage.mean(dim=-1)
+
+                ppo_loss = policy_loss + critic_loss + entropy_bonus
 
                 total_ppo_loss += ppo_loss
 
                 loss_log["policy_loss"].append(policy_loss.mean())
                 loss_log["critic_loss"].append(critic_loss.mean())
                 loss_log["entropy_bonus"].append(entropy_bonus.mean())
+                loss_log["kld_policy"].append(kld_policy.mean())
+                loss_log["advtg_mean"].append(advtg_mean.mean())
+                loss_log["clipped_percentage"].append(clipped_percentage.mean())
+                loss_log["avg_clipped_distance"].append(avg_clipped_distance.mean())
 
             total_ppo_loss /= self.num_memos
             total_pred_model_loss /= self.num_memos
