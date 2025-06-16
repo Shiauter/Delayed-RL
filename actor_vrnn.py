@@ -8,19 +8,37 @@ from util import CrossAttention
 from config import Config
 
 class Policy(nn.Module):
-    def __init__(self, input_dim, out_dim):
+    def __init__(self, input_dim, out_dim, rnn_o_dim, drop):
         super().__init__()
+        self.o_proj = nn.Sequential(
+            nn.Linear(rnn_o_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, input_dim)
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(rnn_o_dim + input_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, input_dim),
+            nn.Sigmoid()
+        )
+        self.dropout = nn.Dropout(p=drop)
         self.fc_pi = nn.Linear(input_dim, out_dim)
         self.fc_v  = nn.Linear(input_dim, 1)
 
     def pi(self, x, s):
-        x = torch.cat([x, s], dim=-1)
+        o_proj = self.o_proj(x)
+        gated_val = self.gate(torch.cat([x, s], dim=-1))
+        gated_val = self.dropout(gated_val)
+        x = F.relu(s + gated_val * o_proj)
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
     def v(self, x, s):
-        x = torch.cat([x, s], dim=-1)
+        o_proj = self.o_proj(x)
+        gated_val = self.gate(torch.cat([x, s], dim=-1))
+        gated_val = self.dropout(gated_val)
+        x = F.relu(s + gated_val * o_proj)
         v = self.fc_v(x)
         return v
 
@@ -56,7 +74,7 @@ class Actor:
             self.s_size, self.z_size, 1, self.hidden_size, config.pred_s_source, config.nll_include_const, config.set_std_to_1
         )
         self.rnn = RNN(self.s_size + self.z_size, 64, self.hidden_size)
-        self.policy = Policy(self.s_size + self.hidden_size, self.a_size)
+        self.policy = Policy(self.s_size, self.a_size, self.hidden_size, config.policy_dropout)
 
     def set_device(self, device: str):
         self.rnn.to(device)

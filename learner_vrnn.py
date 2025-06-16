@@ -149,7 +149,7 @@ class Learner:
         empty_s = torch.zeros(1, self.s_size).to(self.device)
         pred_s = torch.cat([pred_s.squeeze(0), empty_s], dim=0)
         empty_z = torch.zeros(1, self.z_size).to(self.device)
-        phi_z_cond = torch.cat([phi_z_cond, empty_z], dim=1)
+        phi_z_cond = torch.cat([phi_z_cond.squeeze(0), empty_z], dim=0)
         # mu_out = torch.cat([mu_out, empty_data], dim=1)
         return kld_loss, nll_loss, o_cond, mse_loss, pred_s
 
@@ -209,10 +209,10 @@ class Learner:
         ).abs()
         avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
-        critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
+        critic_loss = F.smooth_l1_loss(v_s, return_target.detach())
 
         entropy = Categorical(pi).entropy().mean()
-        entropy_bonus = -self.entropy_weight * entropy
+        entropy_bonus = -entropy
 
         kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
         advtg_mean = advantage.mean()
@@ -247,7 +247,7 @@ class Learner:
                 loss_log["nll_loss"].append(nll_loss.mean())
 
                 policy_loss, critic_loss, entropy_bonus, _, _ = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
-                ppo_loss = policy_loss + critic_loss + entropy_bonus
+                ppo_loss = policy_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_bonus
 
                 total_ppo_loss += ppo_loss
 
@@ -338,7 +338,7 @@ class Learner:
                 clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
                 v_s_mean, td_target_mean = \
                     self.cal_ppo_loss(o_ti, a, prob_a, r, done, s)
-                ppo_loss = policy_loss + critic_loss + entropy_bonus
+                ppo_loss = policy_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_bonus
                 # ppo_loss = critic_loss
                 total_ppo_loss += ppo_loss
 
@@ -376,7 +376,7 @@ class Learner:
                 print(err, k)
         return loss_log, f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
 
-    def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict):
+    def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
         kld, nll, advtg_mean, kld_policy, entropy = \
             loss_log["kld_loss"], loss_log["nll_loss"], \
             loss_log["advtg_mean"], loss_log["kld_policy"], loss_log["entropy_bonus"]
@@ -385,9 +385,10 @@ class Learner:
         #     prev_loss_log["kld_loss"], prev_loss_log["nll_loss"], \
         #     prev_loss_log["advtg_mean"], prev_loss_log["kld_policy"], prev_loss_log["entropy_bonus"]
 
-        pred_model_tier = self._cal_pred_model_param_tier(kld, nll)
-        policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean)
-        self.K_epoch_pred_model, self.K_epoch_policy = self.epoch_tier[pred_model_tier] + 5, self.epoch_tier[policy_tier] + 5
+        pred_model_tier = self._cal_pred_model_param_tier(kld, nll, ep)
+        policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean, ep)
+        self.K_epoch_pred_model = self.epoch_tier[pred_model_tier]
+        self.K_epoch_policy = self.epoch_tier[policy_tier] + 5
         for param_group in self.optim_pred_model.param_groups:
             param_group['lr'] = self.lr_tier[pred_model_tier]
         for param_group in self.optim_policy.param_groups:
@@ -395,7 +396,7 @@ class Learner:
         # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
         return pred_model_tier, policy_tier
 
-    def _cal_pred_model_param_tier(self, kld, recon):
+    def _cal_pred_model_param_tier(self, kld, recon, ep):
         if kld > 0.1:
             return 4
         if kld > 0.05:
@@ -406,6 +407,6 @@ class Learner:
             return 1
         return 0
 
-    def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv):
+    def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv, ep):
         if pred_model_tier >= 2: return 0
         else: return 2

@@ -86,7 +86,7 @@ def worker(env_name, config: Config, conn):
                     "states": s.tolist(),
                     "actions": [delay_a],
                     "probs": [prob[a].item()],
-                    "rewards": [r / 1.0],
+                    "rewards": [r / config.reward_scale],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
                     "a_lsts": a_lst[:-1]
@@ -215,7 +215,7 @@ if __name__ == "__main__":
             learner.actor.load_params(model_state)
             loss_log, avg_loss_str = learner.separated_learning(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
-            pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log)
+            pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log, ep)
             prev_loss_log = loss_log
             actor.load_params(learner.actor.output_params())
 
