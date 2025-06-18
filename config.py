@@ -14,13 +14,14 @@ class Config:
     hidden_size: int = 32
     h0: list = field(init=False)
     T_horizon: int = 500
-    reward_scale: float = 1.0
+    reward_scale: float = 10.0
 
     # policy
     gamma: float = 0.99
     lmbda: float = 0.95
     critic_weight: float = 0.9
     entropy_weight: float = 0.01
+    gate_reg_weight: float = 0.0
     eps_clip: float = 0.2
     policy_dropout: float = 0.0
 
@@ -70,8 +71,8 @@ class Config:
 
         self.h0 = [1, 1, self.hidden_size]
 
-        self.epoch_tier = [1, 3, 5, 7, 10]
-        self.lr_tier = [1e-5, 5e-5, 1e-4, 5e-4, 1e-3]
+        self.epoch_tier = [5, 7, 10, 12, 15]
+        self.lr_tier = [1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
         init_tier = 2
         self.lr, self.lr_policy, self.lr_pred_model = self.lr_tier[init_tier], self.lr_tier[init_tier], self.lr_tier[init_tier]
         self.K_epoch_learn, self.K_epoch_policy, self.K_epoch_pred_model = self.epoch_tier[init_tier], self.epoch_tier[init_tier], self.epoch_tier[init_tier]

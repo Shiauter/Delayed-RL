@@ -28,19 +28,19 @@ class Policy(nn.Module):
     def pi(self, x, s):
         o_proj = self.o_proj(x)
         gated_val = self.gate(torch.cat([x, s], dim=-1))
-        gated_val = self.dropout(gated_val)
-        x = F.relu(s + gated_val * o_proj)
+        g = self.dropout(gated_val)
+        x = F.relu(s + g * o_proj)
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
-        return prob
+        return prob, gated_val
 
     def v(self, x, s):
         o_proj = self.o_proj(x)
         gated_val = self.gate(torch.cat([x, s], dim=-1))
-        gated_val = self.dropout(gated_val)
-        x = F.relu(s + gated_val * o_proj)
+        g = self.dropout(gated_val)
+        x = F.relu(s + g * o_proj)
         v = self.fc_v(x)
-        return v
+        return v, gated_val
 
 class RNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, out_dim):
@@ -97,8 +97,8 @@ class Actor:
         o, h_out, pred_s, z = self.pred_present(s, a_lst, h_in, self.p_iters)
         # print(o.shape, h_out.shape)
         # print(pred_s.shape)
-        pi = self.policy.pi(o, s)
-        v = self.policy.v(o, s)
+        pi, _ = self.policy.pi(o, s)
+        v, _ = self.policy.v(o, s)
         action = Categorical(pi).sample()
         return action.detach(), pi.detach(), h_out.detach(), pred_s.detach(), v.detach()
 

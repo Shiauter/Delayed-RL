@@ -23,6 +23,7 @@ class Learner:
     lmbda: float
     critic_weight: float
     entropy_weight: float
+    gate_reg_weight: float
     eps_clip: float
 
     # pred_model
@@ -171,10 +172,10 @@ class Learner:
     def make_pi_and_critic(self, o, s):
         second_hidden = o[0].unsqueeze(0)
         s = s.unsqueeze(0)
-        pi = self.actor.policy.pi(o, s)
-        v = self.actor.policy.v(o, s)
+        pi, gated_val = self.actor.policy.pi(o, s)
+        v, _ = self.actor.policy.v(o, s)
         pi, v = pi.squeeze(0), v.squeeze(0)
-        return pi, v, second_hidden.detach()
+        return pi, v, second_hidden.detach(), gated_val
 
     def cal_pred_model_loss(self, s, a_lst, first_hidden):
         if self.p_iters > 0:
@@ -188,8 +189,8 @@ class Learner:
         empty_data = torch.zeros(1, self.s_size).to(self.device)
         s_prime = torch.cat([s, empty_data], dim=0)[1:]
 
-        pi, v_s, _ = self.make_pi_and_critic(o_ti[:, :-1, :], s[:-self.delay, :])
-        _ , v_prime, _ = self.make_pi_and_critic(o_ti[:, 1:, :], s_prime[:-self.delay, :])
+        pi, v_s, _, gated_val = self.make_pi_and_critic(o_ti[:, :-1, :], s[:-self.delay, :])
+        _ , v_prime, _, _ = self.make_pi_and_critic(o_ti[:, 1:, :], s_prime[:-self.delay, :])
         advantage, return_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
 
         pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
@@ -214,6 +215,8 @@ class Learner:
         entropy = Categorical(pi).entropy().mean()
         entropy_bonus = -entropy
 
+        gate_reg = ((gated_val - 0.5) ** 2).mean()
+
         kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
         advtg_mean = advantage.mean()
         advtg_std = advantage.std()
@@ -224,7 +227,8 @@ class Learner:
 
         return policy_loss, critic_loss, entropy_bonus, kl_div, \
             advtg_mean, cliped_percentage, avg_clipped_distance, \
-            advtg_std, advtg_min, advtg_max, v_s_mean, td_target_mean
+            advtg_std, advtg_min, advtg_max, v_s_mean, td_target_mean, \
+            gate_reg
 
     def learn(self, memory_list: list[Memory]):
         keys = ["total_loss", "pred_model_loss", "ppo_loss",
@@ -336,9 +340,12 @@ class Learner:
                 start_loss_time = time.time()
                 policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
                 clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
-                v_s_mean, td_target_mean = \
+                v_s_mean, td_target_mean, gate_reg = \
                     self.cal_ppo_loss(o_ti, a, prob_a, r, done, s)
-                ppo_loss = policy_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_bonus
+                ppo_loss = policy_loss + \
+                        self.critic_weight * critic_loss + \
+                        self.entropy_weight * entropy_bonus + \
+                        self.gate_reg_weight * gate_reg
                 # ppo_loss = critic_loss
                 total_ppo_loss += ppo_loss
 
@@ -388,7 +395,7 @@ class Learner:
         pred_model_tier = self._cal_pred_model_param_tier(kld, nll, ep)
         policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean, ep)
         self.K_epoch_pred_model = self.epoch_tier[pred_model_tier]
-        self.K_epoch_policy = self.epoch_tier[policy_tier] + 5
+        self.K_epoch_policy = self.epoch_tier[policy_tier]
         for param_group in self.optim_pred_model.param_groups:
             param_group['lr'] = self.lr_tier[pred_model_tier]
         for param_group in self.optim_policy.param_groups:
@@ -398,15 +405,15 @@ class Learner:
 
     def _cal_pred_model_param_tier(self, kld, recon, ep):
         if kld > 0.1:
-            return 4
+            return 0
         if kld > 0.05:
-            return 3
+            return 1
         if kld > 0.02:
             return 2
         if kld > 0.01:
-            return 1
-        return 0
+            return 3
+        return 4
 
     def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv, ep):
-        if pred_model_tier >= 2: return 0
+        if pred_model_tier <= 2: return 0
         else: return 2
