@@ -1,7 +1,5 @@
 import gymnasium as gym
-from gymnasium.wrappers import RecordVideo
 import torch
-import torch.optim as optim
 import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
@@ -10,8 +8,9 @@ from actor_vrnn import Actor
 from learner_vrnn import Learner
 from util import Memory, merge_dict, check_dir_exist, action_data_sample
 from config import Config
-import pickle
 
+
+# region eval
 def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
     with torch.no_grad():
         env = gym.make(config.env_name, render_mode="rgb_array")
@@ -26,7 +25,7 @@ def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
 
         while not done:
             h_in = h_out
-            a, _, h_out, _, _ = model.sample_action(
+            a, _, h_out, _, _, _ = model.sample_action(
                 torch.from_numpy(s).view(1, 1, -1),
                 torch.tensor(a_lst).view(1, 1, -1),
                 h_in
@@ -56,6 +55,7 @@ def recording_eval(config: Config, model_state, record_dir:str, epoch:int):
         return record_path
 
 
+# region training loop
 def worker(env_name, config: Config, conn):
     env = gym.make(env_name)
     memory = Memory(config.T_horizon)
@@ -132,12 +132,12 @@ def event_loop(config: Config, actor: Actor):
             for obs in observations:
                 if obs is not None:
                     s, a_lst, h_in, done = obs
-                    a, prob, h_out, _, _ = actor.sample_action(
+                    a, prob, h_out, _, _, _ = actor.sample_action(
                         torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
                         torch.tensor(a_lst).view(1, 1, -1),
                         h_in
                     )
-                    actions.append((a, prob, h_out, done))
+                    actions.append((a.detach(), prob.detach(), h_out.detach(), done))
                 else:
                     actions.append(None)
 
@@ -165,7 +165,10 @@ def event_loop(config: Config, actor: Actor):
         num_memos -= num_actors
 
     return aggregated_data
+# endregion
 
+
+# region main
 if __name__ == "__main__":
     mp.set_start_method("spawn", force=True)
 
@@ -197,23 +200,13 @@ if __name__ == "__main__":
         memory_list = event_loop(config, actor)
         total_score = sum([memo.score for memo in memory_list])
         avg_score = total_score / config.num_memos
-        # if avg_score > 400:
-        #     with open("fixed_data.pkl", "wb") as f:
-        #         pickle.dump(memory_list, f)
         print(f"|| Avg score : {avg_score:.1f}")
 
-        # print(f"> {'Training for policy...':<35}", end=" ")
-        # ppo_log, avg_loss_str = learner.learn_policy(memory_list)
-        # print(f"|| Avg Loss  : {avg_loss_str}")
-
-        # print(f"> {'Training for predictive model...':<35}", end=" ")
-        # pred_model_log, avg_loss_str = learner.learn_pred_model(memory_list)
-        # print(f"|| Avg Loss  : {avg_loss_str}")
         model_state = actor.output_params()
         if do_train:
             print(f"> {'Training...':<30}", end=" ")
             learner.actor.load_params(model_state)
-            loss_log, avg_loss_str = learner.separated_learning(memory_list, ep)
+            loss_log, avg_loss_str = learner.learn(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
             pred_model_param_tier, policy_param_tier = learner.adjust_learning_params(loss_log, prev_loss_log, ep)
             prev_loss_log = loss_log
@@ -245,3 +238,4 @@ if __name__ == "__main__":
 
     if do_save:
         writer.close()
+# endregion

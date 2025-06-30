@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field, asdict
 import gym
 import json
-import torch
 
 @dataclass
 class Config:
@@ -19,11 +18,14 @@ class Config:
     # policy
     gamma: float = 0.99
     lmbda: float = 0.95
-    critic_weight: float = 0.9
-    entropy_weight: float = 0.01
+    critic_weight: float = 0.7
+    entropy_weight: float = 0.001
+    advtg_norm: bool = True
     gate_reg_weight: float = 0.0
-    eps_clip: float = 0.2
-    policy_dropout: float = 0.0
+    gate_reg_weight_to_set: float = 0.0
+    set_gate_reg_weight_at_ep: int = 0
+    eps_clip: float = 0.1
+    policy_dropout: float = 0.1
 
     # pred_model
     p_iters: int = delay
@@ -31,33 +33,33 @@ class Config:
     reconst_loss_method: str = "NLL" # NLL, MSE
     pred_s_source: str = "dec_mean_t" # sampled_s, dec_mean_t
     nll_include_const: bool = True # only for nll
-    pause_update_ep: int = None
+    pause_update_ep: int = None # only for separate learning
     set_std_to_1: bool = False
 
     # training params
+    learning_mode: str = "joint" # separate, joint
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    K_epoch_training: int = 300
+    K_epoch_training: int = 1
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
     num_actors: int = 10
-    num_memos: int = 5
+    num_memos: int = 1
     batch_size: int = 50 # for predicting s_ti
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
     device: str = "cpu" # bug: GPU is slower than CPU
-    do_save: bool = True
+    do_save: bool = False
     do_train: bool = True
 
     # S/L
     model_root: str = "./models"
-    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}"
-    # experiment_name = f"CartPole_lstm_ppo"
+    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/gated_residual_raw_state_o_t_v3/{experiment_name}"
+    log_dir = f"{log_root}/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
@@ -71,7 +73,7 @@ class Config:
 
         self.h0 = [1, 1, self.hidden_size]
 
-        self.epoch_tier = [5, 7, 10, 12, 15]
+        self.epoch_tier = [10, 15, 20, 25, 30]
         self.lr_tier = [1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
         init_tier = 2
         self.lr, self.lr_policy, self.lr_pred_model = self.lr_tier[init_tier], self.lr_tier[init_tier], self.lr_tier[init_tier]

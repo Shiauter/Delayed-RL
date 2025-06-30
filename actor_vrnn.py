@@ -22,23 +22,27 @@ class Policy(nn.Module):
             nn.Sigmoid()
         )
         self.dropout = nn.Dropout(p=drop)
-        self.fc_pi = nn.Linear(input_dim, out_dim)
-        self.fc_v  = nn.Linear(input_dim, 1)
+        self.fc_pi = nn.Linear(input_dim + rnn_o_dim, out_dim)
+        self.fc_v  = nn.Linear(input_dim + rnn_o_dim, 1)
 
     def pi(self, x, s):
-        o_proj = self.o_proj(x)
-        gated_val = self.gate(torch.cat([x, s], dim=-1))
-        g = self.dropout(gated_val)
-        x = F.relu(s + g * o_proj)
+        # o_proj = self.o_proj(x)
+        # gated_val = self.gate(torch.cat([x, s], dim=-1))
+        # g = self.dropout(gated_val)
+        # x = s + F.relu(g * o_proj)
+        x = torch.cat([x, s], dim=-1)
+        gated_val = torch.tensor(0)
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob, gated_val
 
     def v(self, x, s):
-        o_proj = self.o_proj(x)
-        gated_val = self.gate(torch.cat([x, s], dim=-1))
-        g = self.dropout(gated_val)
-        x = F.relu(s + g * o_proj)
+        # o_proj = self.o_proj(x)
+        # gated_val = self.gate(torch.cat([x, s], dim=-1))
+        # g = self.dropout(gated_val)
+        # x = s + F.relu(g * o_proj)
+        x = torch.cat([x, s], dim=-1)
+        gated_val = torch.tensor(0)
         v = self.fc_v(x)
         return v, gated_val
 
@@ -95,12 +99,10 @@ class Actor:
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out, pred_s, z = self.pred_present(s, a_lst, h_in, self.p_iters)
-        # print(o.shape, h_out.shape)
-        # print(pred_s.shape)
-        pi, _ = self.policy.pi(o, s)
+        pi, gated_val = self.policy.pi(o, s)
         v, _ = self.policy.v(o, s)
         action = Categorical(pi).sample()
-        return action.detach(), pi.detach(), h_out.detach(), pred_s.detach(), v.detach()
+        return action, pi, h_out, pred_s, v, gated_val
 
     def pred_present(self, s, a, h_in, iters):
         # 這裡是假設會以batch的形式輸入

@@ -1,4 +1,3 @@
-
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -10,6 +9,7 @@ from util import Memory
 from config import Config
 
 class Learner:
+    # region config args
     # env
     s_size: int
     a_size: int
@@ -23,7 +23,10 @@ class Learner:
     lmbda: float
     critic_weight: float
     entropy_weight: float
+    advtg_norm: bool
     gate_reg_weight: float
+    gate_reg_weight_to_set: float
+    set_gate_reg_weight_at_ep: int
     eps_clip: float
 
     # pred_model
@@ -33,129 +36,118 @@ class Learner:
     pause_update_ep: int
 
     # training params
+    learning_mode: str
     num_memos: int
-    num_actors: int
     K_epoch_policy: int
     K_epoch_pred_model: int
     K_epoch_learn: int
     epoch_tier: list
     lr_tier: list
     device: str
+    # endregion
 
     def __init__(self, config: Config):
         for key, value in vars(config).items():
             if key in self.__annotations__:
                 setattr(self, key, value)
 
-        self.actor = Actor(config)
-        self.actor.set_device(config.device)
-        # for param in self.actor.policy.fc_pi.parameters():
-        #     param.requires_grad = False
-        # for param in self.actor.pred_model.parameters():
-        #     param.requires_grad = False
-        # for param in self.actor.rnn.parameters():
-        #     param.requires_grad = False
-        # self.optim_critic = optim.Adam(
-        #     [
-        #         {"params": self.actor.policy.fc_v.parameters()}
-        #     ],
-        #     lr=config.lr_pred_model
-        # )
+        self.actor: Actor = Actor(config)
+        self.optimizers: dict = self._init_optim(config)
 
-        self.optim_pred_model = optim.Adam(
-            [
-                {"params": self.actor.rnn.parameters()},
-                {"params": self.actor.pred_model.parameters()}
-            ],
-            lr=config.lr_pred_model
-        )
-        self.optim_policy = optim.Adam(
-            [
-                {"params": self.actor.policy.parameters()}
-            ],
-            lr=config.lr_policy
-        )
-        self.optim = optim.Adam(
-            [
-                {"params": self.actor.rnn.parameters()},
-                {"params": self.actor.policy.parameters()},
-                {"params": self.actor.pred_model.parameters()}
-            ],
-            lr=config.lr
-        )
-
-    def make_batch(self, memory: Memory):
+    def _make_batch(self, memory: Memory):
         s, a, prob_a, r, s_prime, done, t, a_lst = \
-            map(lambda key: torch.tensor(memory.exps[key]).to(self.device), memory.keys)
+            map(lambda key: torch.tensor(memory.exps[key]).unsqueeze(0).to(self.device), memory.keys)
+
+        # (batch=1, ep_len, data_size)
         return s, a, r, s_prime, done, prob_a, a_lst
 
-    def make_offset_seq(self, s, offset: tuple, limit):
+    # region pred_model
+    def _make_offset_seq(self, target, offset: tuple, limit: int):
         # 給定一組episode中真實的states，以每個state的index為基準，找出相對它offset[0] ~ offset[1] - 1的位置的states所組成的序列
         # limit是最後一個被選為基準的state的index
         # e.g. 假設目前以s[1]為基準，且offset = (1, 3)，對應的序列為s[1] ~ s[2]，limit = 2則代表最後為基準準的state為s[2]
+
+        # target -> (ep_len, s_size)
+
         idx = torch.arange(limit).unsqueeze(1) + torch.arange(offset[0], offset[1]).unsqueeze(0)
-        idx = idx.clamp(max=len(s) - 1)
-        # print(idx)
-        res = s[idx].view(offset[1] - offset[0], -1, self.s_size)
-        return res
+        idx = idx.clamp(max=len(target) - 1)
+        res = target[idx].view(offset[1] - offset[0], -1, self.s_size)
 
-    def make_pred_s_tis(self, s_truth, s, a, h):
-        total_loss = []
+        return res # (offset_len, target_seq_len, target_size)
 
-        # get all starting hidden
-        start_time = time.time()
-        h_truth, h_cond = [h], [h]
-        for x_truth, x_cond, a_lst in zip(s_truth[0], s, a):
-            x_truth, x_cond = x_truth.view(1, 1, -1), x_cond.view(1, 1, -1)
+    def _get_start_h_post(self, s, a_lsts, h, s_truth):
+        # posterior
+        # s       -> (batch=1, ep_len - delay, s_size)
+        # a_lsts  -> (batch=1, ep_len - delay, delay)
+        # h       -> (seq_len=1, batch=1, hidden_size)
+        # s_truth -> (delay, ep_len - delay, s_size)
+
+        # remove batch dimension
+        s, a_lsts = s.squeeze(0), a_lsts.squeeze(0)
+        h_post = [h]
+        for x_post, x_cond, a_lst in zip(s_truth[0], s, a_lsts):
+            x_post, x_cond = x_post.view(1, 1, -1), x_cond.view(1, 1, -1)
             a_first = torch.split(a_lst, 1, dim=-1)[0].view(1, 1, -1)
 
-            _, _, phi_x_truth, phi_z_truth, _, _ = self.actor.pred_model.reconstruct(x_truth, x_cond, a_first, h_truth[-1])
-            rnn_in_truth = torch.cat([phi_x_truth, phi_z_truth], dim=-1)
-            _, h_t_truth = self.actor.rnn(rnn_in_truth, h_truth[-1])
-            h_truth.append(h_t_truth)
+            # for training pred_model
+            _, _, phi_x_post, phi_z_post, _, _ = self.actor.pred_model.reconstruct(x_post, x_cond, a_first, h_post[-1])
+            rnn_in_post = torch.cat([phi_x_post, phi_z_post], dim=-1)
+            _, h_t_post = self.actor.rnn(rnn_in_post, h_post[-1])
+            h_post.append(h_t_post)
 
-            _, phi_x_cond, phi_z_cond = self.actor.pred_model(x_cond, a_first, h_cond[-1])
-            rnn_in_cond = torch.cat([phi_x_cond, phi_z_cond], dim=-1)
-            _, h_t_cond = self.actor.rnn(rnn_in_cond, h_cond[-1])
-            h_cond.append(h_t_cond)
-            # print(f"--- {time.time() - start_time} seconds for starting hidden ---")
-        h_truth = torch.cat(h_truth, dim=1)[:, :-1, :]
-        h_cond = torch.cat(h_cond, dim=1)[:, :-1, :]
+        # (seq_len=1, batch, hidden_size)
+        h_post = torch.cat(h_post, dim=1)[:, :-1, :]
+        return h_post
 
-        # 用所有states和對應的starting hidden產生對未來狀態的預測
-        start_time = time.time()
-        s_truth, pred_s, a = s_truth.unsqueeze(1), s.unsqueeze(0), a.unsqueeze(0) # makes them have same size as hidden
+    def _make_pred_s_tis(self, s, a_lsts, h, s_truth):
+        # s       -> (batch=1, ep_len - delay, s_size) # current s
+        # a_lsts  -> (batch=1, ep_len - delay, delay)
+        # h       -> (seq_len=1, batch=1, hidden_size)
+        # s_truth -> (delay, ep_len - delay, s_size) # for delay prediction
+
+        all_h_in = self._get_start_h_post(s, a_lsts, h, s_truth)
         kld_loss, nll_loss = [], []
         mse_loss = []
-        a_lst = torch.split(a, 1, dim=-1)
+
+        # predicting future state using all states and corresponding starting hidden
+        s_truth = s_truth.unsqueeze(1) # add batch dimension
+        pred_s = s
+        a_lst = torch.split(a_lsts, 1, dim=-1) # split into actions
         for i in range(self.p_iters):
-            kld, nll, phi_x_truth, phi_z_truth, mse, pred_s = self.actor.pred_model.reconstruct(s_truth[i], pred_s, a_lst[i], h_truth)
+            kld, nll, phi_x_truth, phi_z_truth, mse, pred_s = self.actor.pred_model.reconstruct(s_truth[i], pred_s, a_lst[i], all_h_in)
             rnn_in_truth = torch.cat([phi_x_truth, phi_z_truth], dim=-1)
-            _, h_truth = self.actor.rnn(rnn_in_truth, h_truth)
+            _, all_h_in = self.actor.rnn(rnn_in_truth, all_h_in)
             kld_loss.append(kld)
             nll_loss.append(nll)
             mse_loss.append(mse)
 
-            mu_out, phi_x_cond, phi_z_cond = self.actor.pred_model(pred_s, a_lst[i], h_cond)
-            rnn_in_cond = torch.cat([phi_x_cond, phi_z_cond], dim=-1)
-            o_cond, h_cond  = self.actor.rnn(rnn_in_cond, h_cond) # for policy traing
-        # print(f"--- {time.time() - start_time} seconds for following sequences ---")
+        # sum(dim=0) for delay prediction
         kld_loss = torch.cat(kld_loss, dim=0).sum(dim=0).mean()
         nll_loss = torch.cat(nll_loss, dim=0).sum(dim=0).mean()
         mse_loss = torch.stack(mse_loss, dim=0).sum(dim=0).mean()
+        return kld_loss, nll_loss, mse_loss
 
-        # o_cond = torch.cat([o_cond, phi_z_cond], dim=-1)
-        empty_o = torch.zeros(1, 1, self.hidden_size).to(self.device) # for v_prime, placeholder for s_prime after terminal state
-        o_cond = torch.cat([o_cond, empty_o], dim=1)
-        empty_s = torch.zeros(1, self.s_size).to(self.device)
-        pred_s = torch.cat([pred_s.squeeze(0), empty_s], dim=0)
-        empty_z = torch.zeros(1, self.z_size).to(self.device)
-        phi_z_cond = torch.cat([phi_z_cond.squeeze(0), empty_z], dim=0)
-        # mu_out = torch.cat([mu_out, empty_data], dim=1)
-        return kld_loss, nll_loss, o_cond, mse_loss, pred_s
+    def _cal_pred_model_loss(self, s, a_lsts, first_hidden):
+        # s            -> (batch=1, ep_len, s_size)
+        # a_lsts       -> (batch=1, ep_len, delay)
+        # first_hidden -> (seq_len=1, batch=1, hidden_size)
 
-    def cal_advantage(self, v_s, r, v_prime, done_mask):
-        td_target = r + self.gamma * v_prime * done_mask
+        if self.p_iters > 0:
+            limit = s.shape[1] - self.delay
+            offset = (1, self.delay + 1)
+            s_truth = self._make_offset_seq(s.squeeze(0), offset, limit)
+            kld_loss, nll_loss, mse_loss = self._make_pred_s_tis(s[:, :limit], a_lsts[:, :limit], first_hidden, s_truth)
+        return kld_loss, nll_loss, mse_loss
+    # endregion
+
+    # region policy
+    def _cal_advantage(self, v_s, r, v_prime, done_mask):
+        # v_s       -> (ep_len - delay, 1)
+        # r         -> (ep_len, 1)
+        # v_prime   -> (ep_len - delay, 1)
+        # done_mask -> (ep_len, 1)
+
+        td_target = r[self.delay:] + self.gamma * v_prime * done_mask[self.delay:]
         delta = td_target - v_s
 
         advtg_lst = []
@@ -165,35 +157,58 @@ class Learner:
             advtg_lst.append([advtg_t])
         advtg_lst.reverse()
         advantage = torch.tensor(advtg_lst, dtype=torch.float).to(self.device)
-        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+        if self.advtg_norm:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
         return_target = advantage + v_s
-        return advantage, return_target
+        return advantage, return_target # (ep_len, 1)
 
-    def make_pi_and_critic(self, o, s):
-        second_hidden = o[0].unsqueeze(0)
-        s = s.unsqueeze(0)
-        pi, gated_val = self.actor.policy.pi(o, s)
-        v, _ = self.actor.policy.v(o, s)
-        pi, v = pi.squeeze(0), v.squeeze(0)
-        return pi, v, second_hidden.detach(), gated_val
+    def _make_pi_and_critic(self, s, a_lsts, first_hidden):
+        # s      -> (batch=1, ep_len, s_size)
+        # a_lsts -> (batch=1, ep_len, delay) # (batch=1, ep_len - 1, delay) when calculating v_prime
+        # first_hidden -> (seq_len=1, batch=1, hidden_size)
 
-    def cal_pred_model_loss(self, s, a_lst, first_hidden):
-        if self.p_iters > 0:
-            limit = len(s) - self.actor.delay
-            s_truth = self.make_offset_seq(s, (1, self.actor.delay + 1), limit)
-            kld_loss, nll_loss, o_ti, mse_loss, pred_s = self.make_pred_s_tis(s_truth, s[:limit], a_lst[:limit], first_hidden)
-            # print(f"nll: {nll_loss}, kld: {kld_loss}")
-        return kld_loss, nll_loss, o_ti, mse_loss, pred_s
+        # remove batch dimension
+        s, a_lsts = s.squeeze(0), a_lsts.squeeze(0)
+        h_in = first_hidden.squeeze(0)
+        res = {"pi": [], "h_out": [], "v": [], "gated_val": []}
+        for i, (state, a_lst) in enumerate(zip(s, a_lsts)):
+            if i >= s.shape[0] - self.delay: break
+            state, a_lst = state.unsqueeze(0), a_lst.unsqueeze(0)
+            _, pi, h_out, _, v, gated_val = self.actor.sample_action(state, a_lst, h_in)
+            h_in = h_out
 
-    def cal_ppo_loss(self, o_ti, a, prob_a, r, done, s):
-        empty_data = torch.zeros(1, self.s_size).to(self.device)
-        s_prime = torch.cat([s, empty_data], dim=0)[1:]
+            res["pi"].append(pi)
+            res["h_out"].append(h_out)
+            res["v"].append(v)
+            res["gated_val"].append(gated_val.view(-1))
 
-        pi, v_s, _, gated_val = self.make_pi_and_critic(o_ti[:, :-1, :], s[:-self.delay, :])
-        _ , v_prime, _, _ = self.make_pi_and_critic(o_ti[:, 1:, :], s_prime[:-self.delay, :])
-        advantage, return_target = self.cal_advantage(v_s, r[self.delay:], v_prime, done[self.delay:])
+        second_hidden = res["h_out"][0].unsqueeze(0)
+        for k in res.keys():
+            res[k] = torch.stack(res[k]).squeeze(1)
+        return res["pi"], res["v"], second_hidden, res["gated_val"]
 
-        pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
+    def _cal_ppo_loss(self, s, s_prime, a, prob_a, r, done, a_lst, first_hidden):
+        # s       -> (batch=1, ep_len, s_size)
+        # s_prime -> (batch=1, ep_len, s_size)
+        # a       -> (batch=1, ep_len, a_size=1)
+        # prob_a  -> (batch=1, ep_len, 1)
+        # r       -> (batch=1, ep_len, 1)
+        # done    -> (batch=1, ep_len, 1)
+        # a_lst   -> (batch=1, ep_len, delay)
+        # first_hidden -> (seq_len=1, batch=1, hidden_size)
+
+        # remove batch dimension
+        a, prob_a, r, done = a.squeeze(0), prob_a.squeeze(0), r.squeeze(0), done.squeeze(0)
+
+        # The length of two a_lst doesn't have to be the same here
+        # because delay > 0 and it ignored the tail of a_lst
+        pi, v_s, second_hidden, gated_val = self._make_pi_and_critic(s, a_lst, first_hidden)
+        _ , v_prime, _, _ = self._make_pi_and_critic(s_prime, a_lst[:, 1:], second_hidden)
+
+        advantage, return_target = self._cal_advantage(v_s, r, v_prime, done)
+
+        pi_a, prob_a = pi.gather(0, a[self.delay:]), prob_a[:-self.delay]
         ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
         surr1 = ratio * advantage
@@ -210,170 +225,171 @@ class Learner:
         ).abs()
         avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
-        critic_loss = F.smooth_l1_loss(v_s, return_target.detach())
+        critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
 
         entropy = Categorical(pi).entropy().mean()
-        entropy_bonus = -entropy
+        entropy_bonus = -self.entropy_weight * entropy
 
-        gate_reg = ((gated_val - 0.5) ** 2).mean()
+        gate_reg = self.gate_reg_weight * ((gated_val - 0.5) ** 2).mean()
 
         kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
         advtg_mean = advantage.mean()
         advtg_std = advantage.std()
         advtg_min, advtg_max = advantage.min(), advantage.max()
 
+        v_s_std = v_s.std()
         v_s_mean = v_s.mean()
+        td_target_std = return_target.std()
         td_target_mean = return_target.mean()
 
         return policy_loss, critic_loss, entropy_bonus, kl_div, \
             advtg_mean, cliped_percentage, avg_clipped_distance, \
-            advtg_std, advtg_min, advtg_max, v_s_mean, td_target_mean, \
-            gate_reg
+            advtg_std, advtg_min, advtg_max, v_s_std, td_target_std, \
+            v_s_mean, td_target_mean, gate_reg
+    # endregion
 
-    def learn(self, memory_list: list[Memory]):
-        keys = ["total_loss", "pred_model_loss", "ppo_loss",
-                "policy_loss", "critic_loss", "entropy_bonus",
-                "kld_loss", "nll_loss"]
-        loss_log = {}
-        for k in keys:
-            loss_log[k] = []
-
-        for epoch in range(self.K_epoch_learn):
-            total_ppo_loss, total_pred_model_loss = 0, 0
-            for i in range(self.num_memos):
-                s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
-                first_hidden = memory_list[i].h0.detach()
-
-                kld_loss, nll_loss, o_ti = self.cal_pred_model_loss(s, a_lst, first_hidden)
-                total_pred_model_loss += kld_loss + nll_loss
-
-                loss_log["kld_loss"].append(kld_loss.mean())
-                loss_log["nll_loss"].append(nll_loss.mean())
-
-                policy_loss, critic_loss, entropy_bonus, _, _ = self.cal_ppo_loss(o_ti, a, prob_a, r, done)
-                ppo_loss = policy_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_bonus
-
-                total_ppo_loss += ppo_loss
-
-                loss_log["policy_loss"].append(policy_loss.mean())
-                loss_log["critic_loss"].append(critic_loss.mean())
-                loss_log["entropy_bonus"].append(entropy_bonus.mean())
-
-            total_ppo_loss /= self.num_memos
-            total_pred_model_loss /= self.num_memos
-            total_loss = total_ppo_loss + total_pred_model_loss
-
-            self.optim.zero_grad()
-            total_loss.mean().backward()
-            self.optim.step()
-
-            loss_log["total_loss"].append(total_loss)
-            loss_log["ppo_loss"].append(total_ppo_loss)
-            loss_log["pred_model_loss"].append(total_pred_model_loss)
-
-        for k in loss_log.keys():
-            try:
-                loss_log[k] = torch.mean(torch.stack(loss_log[k]))
-            except Exception as err:
-                print(err, k)
-        return loss_log, f'{loss_log["total_loss"]:.9f}'
-
-    def separated_learning(self, memory_list: list[Memory], current_episode: int):
-        # output的指標需要先加在keys中
+    # region training
+    def learn(self, memory_list: list[Memory], current_episode: int):
+        # pred_model_loss, ppo_loss, total_loss are added in training function
         keys = [
-            "pred_model_loss", "kld_loss", "nll_loss",
+            # pred model
+            "kld_loss", "nll_loss",
             "mse_loss",
 
-            "ppo_loss", "policy_loss", "critic_loss",
+            # policy
+            "policy_loss", "critic_loss",
             "entropy_bonus", "kld_policy", "advtg_mean",
             "clipped_percentage", "avg_clipped_distance",
-            "advtg_std", "advtg_min", "advtg_max", "v_s_mean",
-            "td_target_mean"
+            "advtg_std", "advtg_min", "advtg_max", "v_s_std",
+            "td_target_std", "v_s_mean", "td_target_mean"
         ]
 
         loss_log = {}
         for k in keys:
             loss_log[k] = []
 
-        # pred_model
-        start_time = time.time()
-        for epoch in range(self.K_epoch_pred_model):
-            total_pred_model_loss = []
-            for i in range(self.num_memos):
-                start_loss_time = time.time()
-                s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
-                first_hidden = memory_list[i].h0.detach().to(self.device)
+        # region joint
+        if self.learning_mode == "joint":
+            loss_log["total_loss"] = []
+            for epoch in range(self.K_epoch_learn):
+                total_pred_model_loss, total_ppo_loss = [], []
+                for i in range(self.num_memos):
+                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
+                    first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                kld_loss, nll_loss, o_ti, mse_loss, _ = self.cal_pred_model_loss(s, a_lst, first_hidden)
-                if self.reconst_loss_method == "NLL":
-                    total_pred_model_loss.append(kld_loss + nll_loss)
-                elif self.reconst_loss_method == "MSE":
-                    total_pred_model_loss.append(kld_loss + mse_loss)
+                    kld_loss, nll_loss, mse_loss = self._cal_pred_model_loss(s, a_lst, first_hidden)
+                    if self.reconst_loss_method == "NLL":
+                        total_pred_model_loss.append(kld_loss + nll_loss)
+                    elif self.reconst_loss_method == "MSE":
+                        total_pred_model_loss.append(kld_loss + mse_loss)
 
-                loss_log["kld_loss"].append(kld_loss)
-                loss_log["nll_loss"].append(nll_loss)
-                loss_log["mse_loss"].append(mse_loss)
-                # print(f"--- {time.time() - start_loss_time} seconds for pred_model loss ---")
+                    loss_log["kld_loss"].append(kld_loss)
+                    loss_log["nll_loss"].append(nll_loss)
+                    loss_log["mse_loss"].append(mse_loss)
 
-            total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
-            loss_log["pred_model_loss"].append(total_pred_model_loss)
-            # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
+                    policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
+                    clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
+                    v_s_std, td_target_std, v_s_mean, td_target_mean, gate_reg = \
+                        self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
+                    ppo_loss = policy_loss + critic_loss + entropy_bonus + gate_reg
+                    total_ppo_loss.append(ppo_loss)
 
-            # if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
-            #     self.optim_pred_model.zero_grad()
-            #     total_pred_model_loss.mean().backward()
-            #     self.optim_pred_model.step()
-        # print(f"--- {time.time() - start_time} seconds for pred_model training ---")
+                    loss_log["policy_loss"].append(policy_loss)
+                    loss_log["critic_loss"].append(critic_loss)
+                    loss_log["entropy_bonus"].append(entropy_bonus)
+                    loss_log["kld_policy"].append(kld_policy)
+                    loss_log["advtg_mean"].append(advtg_mean)
+                    loss_log["clipped_percentage"].append(clipped_percentage)
+                    loss_log["avg_clipped_distance"].append(avg_clipped_distance)
+                    loss_log["advtg_std"].append(advtg_std)
+                    loss_log["advtg_min"].append(advtg_min)
+                    loss_log["advtg_max"].append(advtg_max)
+                    loss_log["v_s_std"].append(v_s_std)
+                    loss_log["td_target_std"].append(td_target_std)
+                    loss_log["v_s_mean"].append(v_s_mean)
+                    loss_log["td_target_mean"].append(td_target_mean)
 
-        # policy
-        start_time = time.time()
-        for epoch in range(self.K_epoch_policy):
-            total_ppo_loss = 0
-            for i in range(self.num_memos):
-                start_loss_time = time.time()
-                s, a, r, s_prime, done, prob_a, a_lst = self.make_batch(memory_list[i])
-                first_hidden = memory_list[i].h0.detach().to(self.device)
+                total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
+                total_ppo_loss = torch.stack(total_ppo_loss).mean()
+                total_loss = total_pred_model_loss + total_pred_model_loss
+                loss_log["total_loss"].append(total_loss)
 
-                _, _, o_ti, _, pred_s = self.cal_pred_model_loss(s, a_lst, first_hidden)
+                self.optimizers["joint"].zero_grad()
+                total_loss.mean().backward()
+                self.optimizers["joint"].step()
 
-                # print(f"--- {time.time() - start_loss_time} seconds for pred_model loss in policy training ---")
-                start_loss_time = time.time()
-                policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
-                clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
-                v_s_mean, td_target_mean, gate_reg = \
-                    self.cal_ppo_loss(o_ti, a, prob_a, r, done, s)
-                ppo_loss = policy_loss + \
-                        self.critic_weight * critic_loss + \
-                        self.entropy_weight * entropy_bonus + \
-                        self.gate_reg_weight * gate_reg
-                # ppo_loss = critic_loss
-                total_ppo_loss += ppo_loss
+            avg_loss_str = f"total -> {total_loss:.6f}"
+        # endregion
 
-                loss_log["policy_loss"].append(policy_loss)
-                loss_log["critic_loss"].append(critic_loss)
-                loss_log["entropy_bonus"].append(entropy_bonus)
-                loss_log["kld_policy"].append(kld_policy)
-                loss_log["advtg_mean"].append(advtg_mean)
-                loss_log["clipped_percentage"].append(clipped_percentage)
-                loss_log["avg_clipped_distance"].append(avg_clipped_distance)
-                loss_log["advtg_std"].append(advtg_std)
-                loss_log["advtg_min"].append(advtg_min)
-                loss_log["advtg_max"].append(advtg_max)
-                loss_log["v_s_mean"].append(v_s_mean)
-                loss_log["td_target_mean"].append(td_target_mean)
-                # print(f"--- {time.time() - start_loss_time} seconds for policy loss ---")
+        # region separate
+        elif self.learning_mode == "separate":
+            loss_log["pred_model_loss"] = []
+            loss_log["ppo_loss"] = []
 
-            total_ppo_loss /= self.num_memos
-            loss_log["ppo_loss"].append(total_ppo_loss)
-            # print(f"total_policy_loss: {total_ppo_loss} / ep. {epoch + 1}")
+            for epoch in range(self.K_epoch_pred_model):
+                total_pred_model_loss = []
+                for i in range(self.num_memos):
+                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
+                    first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-            self.optim_policy.zero_grad()
-            total_ppo_loss.mean().backward()
-            self.optim_policy.step()
-            # self.optim_critic.zero_grad()
-            # total_ppo_loss.mean().backward()
-            # self.optim_critic.step()
-        # print(f"--- {time.time() - start_time} seconds for policy training ---")
+                    kld_loss, nll_loss, mse_loss = self._cal_pred_model_loss(s, a_lst, first_hidden)
+                    if self.reconst_loss_method == "NLL":
+                        total_pred_model_loss.append(kld_loss + nll_loss)
+                    elif self.reconst_loss_method == "MSE":
+                        total_pred_model_loss.append(kld_loss + mse_loss)
+
+                    loss_log["kld_loss"].append(kld_loss)
+                    loss_log["nll_loss"].append(nll_loss)
+                    loss_log["mse_loss"].append(mse_loss)
+
+                total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
+                loss_log["pred_model_loss"].append(total_pred_model_loss)
+                # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
+
+                if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
+                    self.optimizers["pred_model"].zero_grad()
+                    total_pred_model_loss.mean().backward()
+                    self.optimizers["pred_model"].step()
+
+
+            for epoch in range(self.K_epoch_policy):
+                total_ppo_loss = []
+                for i in range(self.num_memos):
+                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
+                    first_hidden = memory_list[i].h0.detach().to(self.device)
+
+                    policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
+                    clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
+                    v_s_std, td_target_std, v_s_mean, td_target_mean, gate_reg = \
+                        self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
+                    ppo_loss = policy_loss + critic_loss + entropy_bonus + gate_reg
+                    total_ppo_loss.append(ppo_loss)
+
+                    loss_log["policy_loss"].append(policy_loss)
+                    loss_log["critic_loss"].append(critic_loss)
+                    loss_log["entropy_bonus"].append(entropy_bonus)
+                    loss_log["kld_policy"].append(kld_policy)
+                    loss_log["advtg_mean"].append(advtg_mean)
+                    loss_log["clipped_percentage"].append(clipped_percentage)
+                    loss_log["avg_clipped_distance"].append(avg_clipped_distance)
+                    loss_log["advtg_std"].append(advtg_std)
+                    loss_log["advtg_min"].append(advtg_min)
+                    loss_log["advtg_max"].append(advtg_max)
+                    loss_log["v_s_std"].append(v_s_std)
+                    loss_log["td_target_std"].append(td_target_std)
+                    loss_log["v_s_mean"].append(v_s_mean)
+                    loss_log["td_target_mean"].append(td_target_mean)
+
+                total_ppo_loss = torch.stack(total_ppo_loss).mean()
+                loss_log["ppo_loss"].append(total_ppo_loss)
+                # print(f"total_policy_loss: {total_ppo_loss} / ep. {epoch + 1}")
+
+                self.optimizers["policy"].zero_grad()
+                total_ppo_loss.mean().backward()
+                self.optimizers["policy"].step()
+
+            avg_loss_str = f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
+        # endregion
 
         for k in loss_log.keys():
             try:
@@ -381,7 +397,39 @@ class Learner:
             except Exception as err:
                 print()
                 print(err, k)
-        return loss_log, f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
+        return loss_log, avg_loss_str
+    # endregion
+
+    # region learner utils
+    def _init_optim(self, config: Config):
+        optimizers = {}
+        if self.learning_mode == "joint":
+            optimizers["joint"] = optim.Adam(
+                [
+                    {"params": self.actor.rnn.parameters()},
+                    {"params": self.actor.policy.parameters()},
+                    {"params": self.actor.pred_model.parameters()}
+                ],
+                lr=config.lr
+            )
+        elif self.learning_mode == "separate":
+            optimizers["pred_model"] = optim.Adam(
+                [
+                    {"params": self.actor.rnn.parameters()},
+                    {"params": self.actor.pred_model.parameters()}
+                ],
+                lr=config.lr_pred_model
+            )
+            optimizers["policy"] = optim.Adam(
+                [
+                    {"params": self.actor.policy.parameters()}
+                ],
+                lr=config.lr_policy
+            )
+        else:
+            raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
+
+        return optimizers
 
     def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
         kld, nll, advtg_mean, kld_policy, entropy = \
@@ -396,24 +444,33 @@ class Learner:
         policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean, ep)
         self.K_epoch_pred_model = self.epoch_tier[pred_model_tier]
         self.K_epoch_policy = self.epoch_tier[policy_tier]
-        for param_group in self.optim_pred_model.param_groups:
-            param_group['lr'] = self.lr_tier[pred_model_tier]
-        for param_group in self.optim_policy.param_groups:
-            param_group['lr'] = self.lr_tier[pred_model_tier]
+        if self.learning_mode == "separate":
+            for param_group in self.optimizers["pred_model"].param_groups:
+                param_group['lr'] = self.lr_tier[pred_model_tier]
+            for param_group in self.optimizers["policy"].param_groups:
+                param_group['lr'] = self.lr_tier[pred_model_tier]
         # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
+
+        if ep == self.set_gate_reg_weight_at_ep:
+            self.gate_reg_weight = self.gate_reg_weight_to_set
+
         return pred_model_tier, policy_tier
 
     def _cal_pred_model_param_tier(self, kld, recon, ep):
+        epoch_tier = 4
+        if kld > 0.5:
+            epoch_tier = 0
+        if kld > 0.3:
+            epoch_tier = 1
         if kld > 0.1:
-            return 0
+            epoch_tier = 2
         if kld > 0.05:
-            return 1
-        if kld > 0.02:
-            return 2
-        if kld > 0.01:
-            return 3
-        return 4
+            epoch_tier = 3
+        return epoch_tier
 
     def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv, ep):
-        if pred_model_tier <= 2: return 0
-        else: return 2
+        epoch_tier = 4
+        if pred_model_tier <= 2:
+            epoch_tier = 0
+        return epoch_tier
+    # endregion
