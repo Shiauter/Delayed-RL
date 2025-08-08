@@ -9,7 +9,7 @@ class Config:
     env_seed: int = None
     s_size: int = field(init=False)
     a_size: int = field(init=False)
-    delay: int = 1
+    delay: int = 0
     hidden_size: int = 32
     h0: list = field(init=False)
     T_horizon: int = 500
@@ -25,7 +25,7 @@ class Config:
     gate_reg_weight_to_set: float = 0.0
     set_gate_reg_weight_at_ep: int = 0
     eps_clip: float = 0.1
-    policy_dropout: float = 0.1
+    policy_dropout: float = 0.0
 
     # pred_model
     p_iters: int = delay
@@ -37,21 +37,21 @@ class Config:
     set_std_to_1: bool = False
 
     # training params
-    learning_mode: str = "joint" # separate, joint
+    learning_mode: str = "separate" # separate, joint
     lr_pred_model: float = field(init=False)
     lr_policy: float = field(init=False)
     lr: float = field(init=False)
-    K_epoch_training: int = 1
+    K_epoch_training: int = 300
     K_epoch_pred_model: int = field(init=False)
     K_epoch_policy: int = field(init=False)
     K_epoch_learn: int = field(init=False)
     num_actors: int = 10
-    num_memos: int = 1
+    num_memos: int = 5
     batch_size: int = 50 # for predicting s_ti
     epoch_tier: list = field(init=False)
     lr_tier: list = field(init=False)
     device: str = "cpu" # bug: GPU is slower than CPU
-    do_save: bool = False
+    do_save: bool = True
     do_train: bool = True
 
     # S/L
@@ -59,7 +59,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_08_08/vrnn_v2_test_with_pred_model_update/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
@@ -73,7 +73,7 @@ class Config:
 
         self.h0 = [1, 1, self.hidden_size]
 
-        self.epoch_tier = [10, 15, 20, 25, 30]
+        self.epoch_tier = [5, 10, 15, 20, 25]
         self.lr_tier = [1e-3, 5e-4, 1e-4, 5e-5, 1e-5]
         init_tier = 2
         self.lr, self.lr_policy, self.lr_pred_model = self.lr_tier[init_tier], self.lr_tier[init_tier], self.lr_tier[init_tier]

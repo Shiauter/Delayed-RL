@@ -3,44 +3,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from vae import VAE
+from vae_for_vrnn import VAE
 from config import Config
 
 class Policy(nn.Module):
     def __init__(self, input_dim, out_dim):
         super().__init__()
-        h_dim = input_dim // 2
-        self.o_proj = nn.Sequential(
-            nn.Linear(h_dim, 32),
-            nn.ReLU(),
-            nn.Linear(32, h_dim)
-        )
-        self.gate = nn.Sequential(
-            nn.Linear(h_dim * 2, 32),
-            nn.ReLU(),
-            nn.Linear(32, h_dim),
-            nn.Sigmoid()
-        )
-        self.fc1 = nn.Linear(h_dim, h_dim)
-        self.fc_pi = nn.Linear(h_dim, out_dim)
-        self.fc_v  = nn.Linear(h_dim, 1)
+        self.fc_pi = nn.Linear(input_dim, out_dim)
+        self.fc_v  = nn.Linear(input_dim, 1)
 
-    def pi(self, o, first_o):
-        o_proj = self.o_proj(o)
-        g = self.gate(torch.cat([o, first_o], dim=-1))
-        # g = self.dropout(gated_val)
-        x = o + F.relu(g * o_proj)
-        x = F.relu(self.fc1(x))
+    def pi(self, x):
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
-    def v(self, o, first_o):
-        o_proj = self.o_proj(o)
-        g = self.gate(torch.cat([o, first_o], dim=-1))
-        # g = self.dropout(gated_val)
-        x = o + F.relu(g * o_proj)
-        x = F.relu(self.fc1(x))
+    def v(self, x):
         v = self.fc_v(x)
         return v
 
@@ -71,12 +48,12 @@ class Actor:
             if key in self.__annotations__:
                 setattr(self, key, value)
 
-        self.rnn = RNN(self.s_size, 64, self.hidden_size)
         self.pred_model = VAE(
             self.s_size, self.z_size, 1, self.hidden_size,
             config.pred_s_source, config.nll_include_const, config.set_std_to_1
         )
-        self.policy = Policy(self.hidden_size*2, self.a_size)
+        self.rnn = RNN(self.s_size + self.z_size, 64, self.hidden_size)
+        self.policy = Policy(self.hidden_size, self.a_size)
 
     def set_device(self, device: str):
         self.rnn.to(device)
@@ -96,24 +73,28 @@ class Actor:
         }
 
     def sample_action(self, s, a_lst, h_in):
-        o, h_out, pred_s, first_o = self.pred_present(s, a_lst, h_in)
-        pi = self.policy.pi(o, first_o)
-        v = self.policy.v(o, first_o)
+        o, h_out = self.pred_present(s, a_lst, h_in)
+        pi = self.policy.pi(o)
+        v = self.policy.v(o)
         action = Categorical(pi).sample()
-        return action, pi, h_out, pred_s, v
+        return action, pi, h_out, v
 
     def pred_present(self, s, a_lst, h_in):
         # shape => (seq_len, batch, data_size)
+        # pred_o, pred_h = self.rnn(s, h_in)
+        # return pred_o, pred_h
 
-        pred_o, pred_h = self.rnn(s, h_in)
-        first_o = pred_o
+        # inference
+        phi_x, phi_z = self.pred_model(s, h_in)
+        cond_in = torch.cat([phi_x, phi_z], dim=-1)
+        pred_o, pred_h = self.rnn(cond_in, h_in)
         h_out = pred_h
 
-        # p iterations
-        pred_s = s
+        # rollout
         a_lst = torch.split(a_lst, 1, dim=-1)
         for p in range(self.p_iters):
-            pred_s, _, _ = self.pred_model(pred_s, a_lst[p], pred_o)
-            pred_o, pred_h = self.rnn(pred_s, pred_h)
+            phi_x, phi_z = self.pred_model.rollout(a_lst[p], pred_h)
+            cond_in = torch.cat([phi_x, phi_z], dim=-1)
+            pred_o, pred_h = self.rnn(cond_in, pred_h)
 
-        return pred_o, h_out, pred_s, first_o
+        return pred_o, h_out

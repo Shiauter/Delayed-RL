@@ -90,7 +90,7 @@ class Learner:
             a_first = torch.split(a_lst, 1, dim=-1)[0].view(1, 1, -1)
 
             # for training pred_model
-            _, _, phi_x_post, phi_z_post, _, _ = self.actor.pred_model.reconstruct(x_post, x_cond, a_first, h_post[-1])
+            _, _, phi_x_post, phi_z_post, _, _, _ = self.actor.pred_model.reconstruct(x_post, x_cond, a_first, h_post[-1])
             rnn_in_post = torch.cat([phi_x_post, phi_z_post], dim=-1)
             _, h_t_post = self.actor.rnn(rnn_in_post, h_post[-1])
             h_post.append(h_t_post)
@@ -108,24 +108,31 @@ class Learner:
         all_h_in = self._get_start_h_post(s, a_lsts, h, s_truth)
         kld_loss, nll_loss = [], []
         mse_loss = []
+        dec_std = []
 
         # predicting future state using all states and corresponding starting hidden
         s_truth = s_truth.unsqueeze(1) # add batch dimension
         pred_s = s
         a_lst = torch.split(a_lsts, 1, dim=-1) # split into actions
         for i in range(self.p_iters):
-            kld, nll, phi_x_truth, phi_z_truth, mse, pred_s = self.actor.pred_model.reconstruct(s_truth[i], pred_s, a_lst[i], all_h_in)
+            kld, nll, phi_x_truth, phi_z_truth, mse, pred_s, dec_std_t = self.actor.pred_model.reconstruct(s_truth[i], pred_s, a_lst[i], all_h_in)
             rnn_in_truth = torch.cat([phi_x_truth, phi_z_truth], dim=-1)
             _, all_h_in = self.actor.rnn(rnn_in_truth, all_h_in)
             kld_loss.append(kld)
             nll_loss.append(nll)
             mse_loss.append(mse)
+            dec_std.append(dec_std_t)
 
         # sum(dim=0) for delay prediction
         kld_loss = torch.cat(kld_loss, dim=0).sum(dim=0).mean()
         nll_loss = torch.cat(nll_loss, dim=0).sum(dim=0).mean()
         mse_loss = torch.stack(mse_loss, dim=0).sum(dim=0).mean()
-        return kld_loss, nll_loss, mse_loss
+
+        dec_std_mean = torch.cat(dec_std, dim=0).sum(dim=0).mean()
+        dec_std_max = torch.cat(dec_std, dim=0).sum(dim=0).max()
+        dec_std_min = torch.cat(dec_std, dim=0).sum(dim=0).min()
+
+        return kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min
 
     def _cal_pred_model_loss(self, s, a_lsts, first_hidden):
         # s            -> (batch=1, ep_len, s_size)
@@ -136,8 +143,8 @@ class Learner:
             limit = s.shape[1] - self.delay
             offset = (1, self.delay + 1)
             s_truth = self._make_offset_seq(s.squeeze(0), offset, limit)
-            kld_loss, nll_loss, mse_loss = self._make_pred_s_tis(s[:, :limit], a_lsts[:, :limit], first_hidden, s_truth)
-        return kld_loss, nll_loss, mse_loss
+            kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min = self._make_pred_s_tis(s[:, :limit], a_lsts[:, :limit], first_hidden, s_truth)
+        return kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min
     # endregion
 
     # region policy
@@ -208,7 +215,7 @@ class Learner:
 
         advantage, return_target = self._cal_advantage(v_s, r, v_prime, done)
 
-        pi_a, prob_a = pi.gather(0, a[self.delay:]), prob_a[:-self.delay]
+        pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:-self.delay]
         ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
 
         surr1 = ratio * advantage
@@ -253,8 +260,8 @@ class Learner:
         # pred_model_loss, ppo_loss, total_loss are added in training function
         keys = [
             # pred model
-            "kld_loss", "nll_loss",
-            "mse_loss",
+            "kld_loss", "nll_loss", "mse_loss",
+            "dec_std_mean", "dec_std_max", "dec_std_min",
 
             # policy
             "policy_loss", "critic_loss",
@@ -332,7 +339,7 @@ class Learner:
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
                     first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-                    kld_loss, nll_loss, mse_loss = self._cal_pred_model_loss(s, a_lst, first_hidden)
+                    kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min = self._cal_pred_model_loss(s, a_lst, first_hidden)
                     if self.reconst_loss_method == "NLL":
                         total_pred_model_loss.append(kld_loss + nll_loss)
                     elif self.reconst_loss_method == "MSE":
@@ -341,6 +348,9 @@ class Learner:
                     loss_log["kld_loss"].append(kld_loss)
                     loss_log["nll_loss"].append(nll_loss)
                     loss_log["mse_loss"].append(mse_loss)
+                    loss_log["dec_std_mean"].append(dec_std_mean)
+                    loss_log["dec_std_max"].append(dec_std_max)
+                    loss_log["dec_std_min"].append(dec_std_min)
 
                 total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
                 loss_log["pred_model_loss"].append(total_pred_model_loss)

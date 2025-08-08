@@ -105,7 +105,7 @@ class VAE(nn.Module):
         # mse_loss = F.mse_loss(x, dec_mean_t, reduction="mean")
         # print("mse mean", mse_loss)
         # print("$$$$")
-        return kld_loss, nll_loss, phi_x_t, phi_z_t, mse_loss, pred_s
+        return kld_loss, nll_loss, phi_x_t, phi_z_t, mse_loss, pred_s, dec_std_t
 
     def forward(self, s_t, a, h):
         # s = (batch, s_size)
