@@ -9,15 +9,19 @@ from config import Config
 class Policy(nn.Module):
     def __init__(self, input_dim, out_dim):
         super().__init__()
+        # h_dim = input_dim * 2
+        # self.fc1 = nn.Linear(input_dim, h_dim)
         self.fc_pi = nn.Linear(input_dim, out_dim)
         self.fc_v  = nn.Linear(input_dim, 1)
 
     def pi(self, x):
+        # x = F.relu(self.fc1(x))
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
     def v(self, x):
+        # x = F.relu(self.fc1(x))
         v = self.fc_v(x)
         return v
 

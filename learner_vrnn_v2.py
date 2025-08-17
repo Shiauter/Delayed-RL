@@ -5,7 +5,7 @@ from torch.distributions import Categorical
 import time
 
 from actor_vrnn_v2 import Actor
-from util import Memory
+from util import Memory, clamp
 from config import Config
 
 class Learner:
@@ -28,19 +28,24 @@ class Learner:
     gate_reg_weight_to_set: float
     set_gate_reg_weight_at_ep: int
     eps_clip: float
+    kld_policy_range: list
 
     # pred_model
     p_iters: int
     z_size: int
     reconst_loss_method: str
     pause_update_ep: int
+    kld_range: list
 
     # training params
     learning_mode: str
     num_memos: int
-    K_epoch_policy: int
-    K_epoch_pred_model: int
-    K_epoch_learn: int
+    epoch_tier_joint: int
+    epoch_tier_policy: int
+    epoch_tier_pred_model: int
+    lr_tier_joint: int
+    lr_tier_policy: int
+    lr_tier_pred_model: int
     epoch_tier: list
     lr_tier: list
     device: str
@@ -160,7 +165,6 @@ class Learner:
 
         pi, v_s, second_hidden = self._make_pi_and_critic(s, a_lst, first_hidden)
         _ , v_prime, _ = self._make_pi_and_critic(s_prime, a_lst_prime, second_hidden)
-
         advantage, return_target = self._cal_advantage(v_s, r, v_prime, done)
 
         pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
@@ -185,7 +189,7 @@ class Learner:
         entropy = Categorical(pi).entropy().mean()
         entropy_bonus = -self.entropy_weight * entropy
 
-        kl_div = (pi * (torch.log(pi) - torch.log(prob_a))).sum(dim=-1).mean()
+        kl_div = (torch.log(prob_a) - torch.log(pi_a)).mean()
         advtg_mean = advantage.mean()
         advtg_std = advantage.std()
         advtg_min, advtg_max = advantage.min(), advantage.max()
@@ -224,7 +228,7 @@ class Learner:
         # region joint
         if self.learning_mode == "joint":
             loss_log["total_loss"] = []
-            for epoch in range(self.K_epoch_learn):
+            for epoch in range(self.epoch_tier[self.epoch_tier_joint]):
                 total_pred_model_loss, total_ppo_loss = [], []
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
@@ -265,7 +269,7 @@ class Learner:
 
                 total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
                 total_ppo_loss = torch.stack(total_ppo_loss).mean()
-                total_loss = total_pred_model_loss + total_pred_model_loss
+                total_loss = total_ppo_loss + total_pred_model_loss
                 loss_log["total_loss"].append(total_loss)
 
                 self.optimizers["joint"].zero_grad()
@@ -280,8 +284,10 @@ class Learner:
             loss_log["pred_model_loss"] = []
             loss_log["ppo_loss"] = []
 
-            for epoch in range(self.K_epoch_policy):
+            check_point = time.time()
+            for epoch in range(self.epoch_tier[self.epoch_tier_policy]):
                 total_ppo_loss = []
+                timer = time.time()
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
@@ -307,17 +313,20 @@ class Learner:
                     loss_log["td_target_std"].append(td_target_std)
                     loss_log["v_s_mean"].append(v_s_mean)
                     loss_log["td_target_mean"].append(td_target_mean)
-
+                print(f"memo loop: {time.time() - timer} sec.")
                 total_ppo_loss = torch.stack(total_ppo_loss).mean()
                 loss_log["ppo_loss"].append(total_ppo_loss)
                 # print(f"total_policy_loss: {total_ppo_loss} / ep. {epoch + 1}")
 
+                timer = time.time()
                 self.optimizers["policy"].zero_grad()
                 total_ppo_loss.mean().backward()
                 self.optimizers["policy"].step()
+                print(f"backprop: {time.time() - timer} sec.")
+            print(f"policy training: {time.time() - check_point} sec.")
 
-
-            for epoch in range(self.K_epoch_pred_model):
+            check_point = time.time()
+            for epoch in range(self.epoch_tier[self.epoch_tier_pred_model]):
                 total_pred_model_loss = []
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
@@ -344,7 +353,7 @@ class Learner:
                     self.optimizers["pred_model"].zero_grad()
                     total_pred_model_loss.mean().backward()
                     self.optimizers["pred_model"].step()
-
+            print(f"pred_model training: {time.time() - check_point} sec.")
             avg_loss_str = f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
         # endregion
 
@@ -370,7 +379,7 @@ class Learner:
                     {"params": self.actor.policy.parameters()},
                     {"params": self.actor.pred_model.parameters()}
                 ],
-                lr=config.lr
+                lr=self.lr_tier[self.lr_tier_joint]
             )
         elif self.learning_mode == "separate":
             optimizers["pred_model"] = optim.Adam(
@@ -378,15 +387,19 @@ class Learner:
                     {"params": self.actor.rnn.parameters()},
                     {"params": self.actor.pred_model.parameters()}
                 ],
-                lr=config.lr_pred_model
+                lr=self.lr_tier[self.lr_tier_pred_model]
             )
             optimizers["policy"] = optim.Adam(
                 [
-                    {"params": self.actor.pred_model.parameters()},
+                    {"params": self.actor.pred_model.enc_net.parameters()},
+                    {"params": self.actor.pred_model.enc_mean.parameters()},
+                    # {"params": self.actor.pred_model.enc_std.parameters()},
+                    {"params": self.actor.pred_model.phi_x.parameters()},
+                    {"params": self.actor.pred_model.phi_z.parameters()},
                     {"params": self.actor.rnn.parameters()},
                     {"params": self.actor.policy.parameters()}
                 ],
-                lr=config.lr_policy
+                lr=self.lr_tier[self.lr_tier_policy]
             )
         else:
             raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
@@ -394,46 +407,50 @@ class Learner:
         return optimizers
 
     def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
-        if self.p_iters == 0: return -1, -1
-        kld, nll, advtg_mean, kld_policy, entropy = \
+        # if self.p_iters == 0: return -1, -1
+        kld, nll, advtg_mean, kld_policy, entropy, avg_clipped_distance = \
             loss_log["kld_loss"], loss_log["nll_loss"], \
-            loss_log["advtg_mean"], loss_log["kld_policy"], loss_log["entropy_bonus"]
+            loss_log["advtg_mean"], loss_log["kld_policy"], \
+            loss_log["entropy_bonus"], loss_log["avg_clipped_distance"]
 
         # prev_kld, prev_nll, prev_advtg_mean, prev_kld_policy, prev_entropy = \
         #     prev_loss_log["kld_loss"], prev_loss_log["nll_loss"], \
         #     prev_loss_log["advtg_mean"], prev_loss_log["kld_policy"], prev_loss_log["entropy_bonus"]
 
-        pred_model_tier = self._cal_pred_model_param_tier(kld, nll, ep)
-        policy_tier = self._cal_policy_param_tier(pred_model_tier, kld_policy, entropy, advtg_mean, ep)
-        self.K_epoch_pred_model = self.epoch_tier[pred_model_tier]
-        self.K_epoch_policy = self.epoch_tier[policy_tier]
+        self._cal_pred_model_param_tier(kld)
+        self._cal_policy_param_tier(kld_policy, avg_clipped_distance)
+
         if self.learning_mode == "separate":
             for param_group in self.optimizers["pred_model"].param_groups:
-                param_group['lr'] = self.lr_tier[pred_model_tier]
+                param_group['lr'] = self.lr_tier[self.lr_tier_pred_model]
             for param_group in self.optimizers["policy"].param_groups:
-                param_group['lr'] = self.lr_tier[pred_model_tier]
+                param_group['lr'] = self.lr_tier[self.lr_tier_policy]
         # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
 
         if ep == self.set_gate_reg_weight_at_ep:
             self.gate_reg_weight = self.gate_reg_weight_to_set
 
-        return pred_model_tier, policy_tier
+        return self.epoch_tier_pred_model, self.lr_tier_pred_model,\
+               self.epoch_tier_policy, self.lr_tier_policy
 
-    def _cal_pred_model_param_tier(self, kld, recon, ep):
-        epoch_tier = 4
-        if kld > 0.5:
-            epoch_tier = 0
-        if kld > 0.3:
-            epoch_tier = 1
-        if kld > 0.1:
-            epoch_tier = 2
-        if kld > 0.05:
-            epoch_tier = 3
-        return epoch_tier
+    def _cal_pred_model_param_tier(self, kld):
+        if kld < self.kld_range[0]: tier_adj = -1
+        elif kld > self.kld_range[1]: tier_adj = 1
+        else: tier_adj = 0
 
-    def _cal_policy_param_tier(self, pred_model_tier, kld, entropy, adv, ep):
-        epoch_tier = 4
-        if pred_model_tier <= 2:
-            epoch_tier = 0
-        return epoch_tier
+        # self.epoch_tier_pred_model = clamp(
+        #     self.epoch_tier_pred_model + tier_adj, 0, len(self.epoch_tier) - 1)
+        self.lr_tier_pred_model = clamp(
+            self.lr_tier_pred_model + tier_adj, 0, len(self.lr_tier) - 1)
+
+    def _cal_policy_param_tier(self, kld, avg_clipped_distance):
+        if kld < self.kld_policy_range[0] and avg_clipped_distance < 0.02: tier_adj = -1
+        elif kld > self.kld_policy_range[1] or avg_clipped_distance > 0.04: tier_adj = 1
+        else: tier_adj = 0
+
+        # self.epoch_tier_policy = clamp(
+        #     self.epoch_tier_policy + tier_adj, 0, len(self.epoch_tier) - 1)
+        self.lr_tier_policy = clamp(
+            self.lr_tier_policy + tier_adj, 0, 2)
+
     # endregion
