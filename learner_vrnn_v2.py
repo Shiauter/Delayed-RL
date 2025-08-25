@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.optim.lr_scheduler as sched
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import time
@@ -28,26 +29,34 @@ class Learner:
     gate_reg_weight_to_set: float
     set_gate_reg_weight_at_ep: int
     eps_clip: float
-    kld_policy_range: list
+    # kld_policy_range: list
 
     # pred_model
     p_iters: int
     z_size: int
     reconst_loss_method: str
     pause_update_ep: int
-    kld_range: list
+    # kld_range: list
+    joint_elbo_weight: float
 
     # training params
     learning_mode: str
     num_memos: int
-    epoch_tier_joint: int
-    epoch_tier_policy: int
-    epoch_tier_pred_model: int
-    lr_tier_joint: int
-    lr_tier_policy: int
-    lr_tier_pred_model: int
-    epoch_tier: list
-    lr_tier: list
+    epoch_joint: int
+    epoch_pred_model: int
+    epoch_policy: int
+    lr_joint: float
+    lr_pred_model: float
+    lr_policy: float
+    # epoch_tier_joint: int
+    # epoch_tier_policy: int
+    # epoch_tier_pred_model: int
+    # lr_tier_joint: int
+    # lr_tier_policy: int
+    # lr_tier_pred_model: int
+    # epoch_tier: list
+    # lr_tier: list
+    do_lr_sched: bool
     device: str
     # endregion
 
@@ -58,10 +67,11 @@ class Learner:
 
         self.actor: Actor = Actor(config)
         self.optimizers: dict = self._init_optim(config)
+        self.schedulers: dict = self._init_sched(config)
 
     def _make_batch(self, memory: Memory):
         s, a, prob_a, r, s_prime, done, t, a_lst = \
-            map(lambda key: torch.tensor(memory.exps[key]).unsqueeze(0).to(self.device), memory.keys)
+            map(lambda key: torch.tensor(memory.exps[key]).unsqueeze(0).to(self.device).detach(), memory.keys)
 
         # (batch=1, ep_len, data_size)
         return s, a, r, s_prime, done, prob_a, a_lst
@@ -83,23 +93,49 @@ class Learner:
             all_h.append(pred_h)
         return torch.cat(all_h[:-1], dim=1)
 
-    def _cal_pred_model_loss(self, s, a_lsts, first_hidden):
+    def _cal_pred_model_loss(self, s, a_lsts, first_hidden, s_prime):
         # s       -> (batch=1, ep_len, s_size) # current s
         # a_lsts  -> (batch=1, ep_len, delay)
         # h       -> (seq_len=1, batch=1, hidden_size)
 
-        all_h = self._get_start_h(s, first_hidden) # ep_len - 1
-
         # predicting one step future state using true state
-        a = torch.split(a_lsts[:, :-1], 1, dim=-1)[0] # split into actions
-        kld_loss, nll_loss, mse_loss, dec_std = self.actor.pred_model.cal_loss(s[:, 1:], a, all_h)
-        kld_loss, nll_loss, mse_loss = kld_loss.sum(dim=0).mean(), nll_loss.sum(dim=0).mean(), mse_loss.sum(dim=0).mean()
+        s = torch.cat([s[:, 1:, :], s_prime[:, -1, :].unsqueeze(1)], dim=1).split(1, dim=1)
+        a = torch.split(a_lsts, 1, dim=-1)[0].split(1, dim=1) # split into actions
+        h = first_hidden
 
-        dec_std_mean = dec_std.sum(dim=0).mean()
-        dec_std_max = dec_std.sum(dim=0).max()
-        dec_std_min = dec_std.sum(dim=0).min()
+        kld_loss, nll_loss, mse_loss = [], [], []
+        dec_std_log = []
+        z_vanishing_log = {
+            "delta_mse_prior": [],
+            "delta_mse_zero": [],
+            "delta_mse_shuf": [],
+            "delta_nll_prior": [],
+            "delta_nll_zero": [],
+            "delta_nll_shuf": [],
+        }
+        for i in range(len(s)):
+            kld, nll, mse, phi_x, phi_z, dec_std, z_vanishing_out = self.actor.pred_model.cal_loss(s[i], a[i], h)
+            cond_in = torch.cat([phi_x, phi_z], dim=-1)
+            _, h = self.actor.rnn(cond_in, h)
 
-        return kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min
+            kld_loss.append(kld.squeeze())
+            nll_loss.append(nll.squeeze())
+            mse_loss.append(mse.squeeze())
+            dec_std_log.append(dec_std)
+
+            for k in z_vanishing_log.keys():
+                z_vanishing_log[k].append(z_vanishing_out[k])
+
+        kld_loss, nll_loss, mse_loss = torch.stack(kld_loss).mean(), torch.stack(nll_loss).mean(), torch.stack(mse_loss).mean()
+        for k in z_vanishing_log.keys():
+            z_vanishing_log[k] = torch.stack(z_vanishing_log[k]).mean()
+
+        dec_std_log = torch.stack(dec_std_log).mean(dim=-1)
+        dec_std_mean = dec_std_log.mean()
+        dec_std_max = dec_std_log.max()
+        dec_std_min = dec_std_log.min()
+
+        return kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min, z_vanishing_log
     # endregion
 
     # region policy
@@ -184,10 +220,10 @@ class Learner:
         ).abs()
         avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
-        critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
+        critic_loss = F.smooth_l1_loss(v_s, return_target.detach())
 
         entropy = Categorical(pi).entropy().mean()
-        entropy_bonus = -self.entropy_weight * entropy
+        entropy_bonus = -entropy
 
         kl_div = (torch.log(prob_a) - torch.log(pi_a)).mean()
         advtg_mean = advantage.mean()
@@ -212,6 +248,8 @@ class Learner:
             # pred model
             "kld_loss", "nll_loss", "mse_loss",
             "dec_std_mean", "dec_std_max", "dec_std_min",
+            "delta_mse_prior", "delta_mse_zero", "delta_mse_shuf",
+            "delta_nll_prior", "delta_nll_zero", "delta_nll_shuf",
 
             # policy
             "policy_loss", "critic_loss",
@@ -228,28 +266,39 @@ class Learner:
         # region joint
         if self.learning_mode == "joint":
             loss_log["total_loss"] = []
-            for epoch in range(self.epoch_tier[self.epoch_tier_joint]):
+            for epoch in range(self.epoch_joint):
                 total_pred_model_loss, total_ppo_loss = [], []
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                    if self.p_iters > 0:
-                        kld_loss, nll_loss, mse_loss = self._cal_pred_model_loss(s, a, first_hidden)
-                        if self.reconst_loss_method == "NLL":
-                            total_pred_model_loss.append(kld_loss + nll_loss)
-                        elif self.reconst_loss_method == "MSE":
-                            total_pred_model_loss.append(kld_loss + mse_loss)
+                    kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min, z_vanishing_out = self._cal_pred_model_loss(s, a, first_hidden, s_prime)
+                    if self.reconst_loss_method == "NLL":
+                        total_pred_model_loss.append(kld_loss + nll_loss)
+                    elif self.reconst_loss_method == "MSE":
+                        total_pred_model_loss.append(kld_loss + mse_loss)
 
-                        loss_log["kld_loss"].append(kld_loss)
-                        loss_log["nll_loss"].append(nll_loss)
-                        loss_log["mse_loss"].append(mse_loss)
+                    loss_log["kld_loss"].append(kld_loss)
+                    loss_log["nll_loss"].append(nll_loss)
+                    loss_log["mse_loss"].append(mse_loss)
+                    loss_log["dec_std_mean"].append(dec_std_mean)
+                    loss_log["dec_std_max"].append(dec_std_max)
+                    loss_log["dec_std_min"].append(dec_std_min)
+                    loss_log["delta_mse_prior"].append(z_vanishing_out["delta_mse_prior"])
+                    loss_log["delta_mse_zero"].append(z_vanishing_out["delta_mse_zero"])
+                    loss_log["delta_mse_shuf"].append(z_vanishing_out["delta_mse_shuf"])
+                    loss_log["delta_nll_prior"].append(z_vanishing_out["delta_nll_prior"])
+                    loss_log["delta_nll_zero"].append(z_vanishing_out["delta_nll_zero"])
+                    loss_log["delta_nll_shuf"].append(z_vanishing_out["delta_nll_shuf"])
+
 
                     policy_loss, critic_loss, entropy_bonus, kld_policy, advtg_mean, \
                     clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
                     v_s_std, td_target_std, v_s_mean, td_target_mean = \
                         self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
-                    ppo_loss = policy_loss + critic_loss + entropy_bonus
+                    ppo_loss = policy_loss + \
+                        self.critic_weight * critic_loss + \
+                        self.entropy_weight * entropy_bonus
                     total_ppo_loss.append(ppo_loss)
 
                     loss_log["policy_loss"].append(policy_loss)
@@ -269,7 +318,7 @@ class Learner:
 
                 total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
                 total_ppo_loss = torch.stack(total_ppo_loss).mean()
-                total_loss = total_ppo_loss + total_pred_model_loss
+                total_loss = total_ppo_loss + self.joint_elbo_weight * total_pred_model_loss
                 loss_log["total_loss"].append(total_loss)
 
                 self.optimizers["joint"].zero_grad()
@@ -285,9 +334,8 @@ class Learner:
             loss_log["ppo_loss"] = []
 
             check_point = time.time()
-            for epoch in range(self.epoch_tier[self.epoch_tier_policy]):
+            for epoch in range(self.epoch_policy):
                 total_ppo_loss = []
-                timer = time.time()
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
@@ -296,7 +344,9 @@ class Learner:
                     clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
                     v_s_std, td_target_std, v_s_mean, td_target_mean = \
                         self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
-                    ppo_loss = policy_loss + critic_loss + entropy_bonus
+                    ppo_loss = policy_loss + \
+                        self.critic_weight * critic_loss + \
+                        self.entropy_weight * entropy_bonus
                     total_ppo_loss.append(ppo_loss)
 
                     loss_log["policy_loss"].append(policy_loss)
@@ -313,26 +363,23 @@ class Learner:
                     loss_log["td_target_std"].append(td_target_std)
                     loss_log["v_s_mean"].append(v_s_mean)
                     loss_log["td_target_mean"].append(td_target_mean)
-                print(f"memo loop: {time.time() - timer} sec.")
                 total_ppo_loss = torch.stack(total_ppo_loss).mean()
                 loss_log["ppo_loss"].append(total_ppo_loss)
                 # print(f"total_policy_loss: {total_ppo_loss} / ep. {epoch + 1}")
 
-                timer = time.time()
                 self.optimizers["policy"].zero_grad()
                 total_ppo_loss.mean().backward()
                 self.optimizers["policy"].step()
-                print(f"backprop: {time.time() - timer} sec.")
-            print(f"policy training: {time.time() - check_point} sec.")
+            # print(f"policy training: {time.time() - check_point} sec.")
 
             check_point = time.time()
-            for epoch in range(self.epoch_tier[self.epoch_tier_pred_model]):
+            for epoch in range(self.epoch_pred_model):
                 total_pred_model_loss = []
                 for i in range(self.num_memos):
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
                     first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-                    kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min = self._cal_pred_model_loss(s, a, first_hidden)
+                    kld_loss, nll_loss, mse_loss, dec_std_mean, dec_std_max, dec_std_min, z_vanishing_out = self._cal_pred_model_loss(s, a, first_hidden, s_prime)
                     if self.reconst_loss_method == "NLL":
                         total_pred_model_loss.append(kld_loss + nll_loss)
                     elif self.reconst_loss_method == "MSE":
@@ -344,6 +391,12 @@ class Learner:
                     loss_log["dec_std_mean"].append(dec_std_mean)
                     loss_log["dec_std_max"].append(dec_std_max)
                     loss_log["dec_std_min"].append(dec_std_min)
+                    loss_log["delta_mse_prior"].append(z_vanishing_out["delta_mse_prior"])
+                    loss_log["delta_mse_zero"].append(z_vanishing_out["delta_mse_zero"])
+                    loss_log["delta_mse_shuf"].append(z_vanishing_out["delta_mse_shuf"])
+                    loss_log["delta_nll_prior"].append(z_vanishing_out["delta_nll_prior"])
+                    loss_log["delta_nll_zero"].append(z_vanishing_out["delta_nll_zero"])
+                    loss_log["delta_nll_shuf"].append(z_vanishing_out["delta_nll_shuf"])
 
                 total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
                 loss_log["pred_model_loss"].append(total_pred_model_loss)
@@ -353,7 +406,7 @@ class Learner:
                     self.optimizers["pred_model"].zero_grad()
                     total_pred_model_loss.mean().backward()
                     self.optimizers["pred_model"].step()
-            print(f"pred_model training: {time.time() - check_point} sec.")
+            # print(f"pred_model training: {time.time() - check_point} sec.")
             avg_loss_str = f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
         # endregion
 
@@ -379,78 +432,120 @@ class Learner:
                     {"params": self.actor.policy.parameters()},
                     {"params": self.actor.pred_model.parameters()}
                 ],
-                lr=self.lr_tier[self.lr_tier_joint]
+                lr=self.lr_joint
             )
         elif self.learning_mode == "separate":
             optimizers["pred_model"] = optim.Adam(
                 [
-                    {"params": self.actor.rnn.parameters()},
-                    {"params": self.actor.pred_model.parameters()}
+                    {"params": self.actor.pred_model.parameters()},
+                    {"params": self.actor.rnn.parameters()}
                 ],
-                lr=self.lr_tier[self.lr_tier_pred_model]
+                lr=self.lr_pred_model
             )
             optimizers["policy"] = optim.Adam(
                 [
                     {"params": self.actor.pred_model.enc_net.parameters()},
                     {"params": self.actor.pred_model.enc_mean.parameters()},
-                    # {"params": self.actor.pred_model.enc_std.parameters()},
+                    {"params": self.actor.pred_model.enc_std.parameters()},
                     {"params": self.actor.pred_model.phi_x.parameters()},
                     {"params": self.actor.pred_model.phi_z.parameters()},
                     {"params": self.actor.rnn.parameters()},
                     {"params": self.actor.policy.parameters()}
                 ],
-                lr=self.lr_tier[self.lr_tier_policy]
+                lr=self.lr_policy
             )
         else:
             raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
 
         return optimizers
 
-    def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
-        # if self.p_iters == 0: return -1, -1
-        kld, nll, advtg_mean, kld_policy, entropy, avg_clipped_distance = \
-            loss_log["kld_loss"], loss_log["nll_loss"], \
-            loss_log["advtg_mean"], loss_log["kld_policy"], \
-            loss_log["entropy_bonus"], loss_log["avg_clipped_distance"]
+    def _init_sched(self, config: Config):
+        schedulers = {}
+        if self.learning_mode == "joint":
+            schedulers["joint"] = sched.ReduceLROnPlateau(
+                self.optimizers["joint"], mode='min', factor=0.5, patience=6,
+                threshold=1e-3, threshold_mode='rel',
+                cooldown=2, min_lr=5e-5, verbose=True
+            )
+        elif self.learning_mode == "separate":
+            schedulers["pred_model"] = sched.ReduceLROnPlateau(
+                self.optimizers["pred_model"], mode='min', factor=0.5, patience=6,
+                threshold=1e-3, threshold_mode='rel',
+                cooldown=2, min_lr=5e-5, verbose=True
+            )
+            schedulers["policy"] = sched.LambdaLR(
+                self.optimizers["policy"],
+                lr_lambda=lambda u: 1.0 - min(u, config.K_epoch_training)/config.K_epoch_training
+            )
+        else:
+            raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
 
-        # prev_kld, prev_nll, prev_advtg_mean, prev_kld_policy, prev_entropy = \
-        #     prev_loss_log["kld_loss"], prev_loss_log["nll_loss"], \
-        #     prev_loss_log["advtg_mean"], prev_loss_log["kld_policy"], prev_loss_log["entropy_bonus"]
+        return schedulers
 
-        self._cal_pred_model_param_tier(kld)
-        self._cal_policy_param_tier(kld_policy, avg_clipped_distance)
+    # def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
+    #     if self.auto_tuning_param_tier:
+    #         kld, nll, advtg_mean, kld_policy, entropy, avg_clipped_distance = \
+    #             loss_log["kld_loss"], loss_log["nll_loss"], \
+    #             loss_log["advtg_mean"], loss_log["kld_policy"], \
+    #             loss_log["entropy_bonus"], loss_log["avg_clipped_distance"]
 
-        if self.learning_mode == "separate":
-            for param_group in self.optimizers["pred_model"].param_groups:
-                param_group['lr'] = self.lr_tier[self.lr_tier_pred_model]
-            for param_group in self.optimizers["policy"].param_groups:
-                param_group['lr'] = self.lr_tier[self.lr_tier_policy]
-        # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
+    #         # prev_kld, prev_nll, prev_advtg_mean, prev_kld_policy, prev_entropy = \
+    #         #     prev_loss_log["kld_loss"], prev_loss_log["nll_loss"], \
+    #         #     prev_loss_log["advtg_mean"], prev_loss_log["kld_policy"], prev_loss_log["entropy_bonus"]
 
-        if ep == self.set_gate_reg_weight_at_ep:
-            self.gate_reg_weight = self.gate_reg_weight_to_set
+    #         self._cal_pred_model_param_tier(kld)
+    #         self._cal_policy_param_tier(kld_policy, avg_clipped_distance)
 
-        return self.epoch_tier_pred_model, self.lr_tier_pred_model,\
-               self.epoch_tier_policy, self.lr_tier_policy
+    #         if self.learning_mode == "separate":
+    #             for param_group in self.optimizers["pred_model"].param_groups:
+    #                 param_group['lr'] = self.lr_tier[self.lr_tier_pred_model]
+    #             for param_group in self.optimizers["policy"].param_groups:
+    #                 param_group['lr'] = self.lr_tier[self.lr_tier_policy]
+    #         # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
 
-    def _cal_pred_model_param_tier(self, kld):
-        if kld < self.kld_range[0]: tier_adj = -1
-        elif kld > self.kld_range[1]: tier_adj = 1
-        else: tier_adj = 0
+    #         if ep == self.set_gate_reg_weight_at_ep:
+    #             self.gate_reg_weight = self.gate_reg_weight_to_set
 
-        # self.epoch_tier_pred_model = clamp(
-        #     self.epoch_tier_pred_model + tier_adj, 0, len(self.epoch_tier) - 1)
-        self.lr_tier_pred_model = clamp(
-            self.lr_tier_pred_model + tier_adj, 0, len(self.lr_tier) - 1)
+    #     return self.epoch_tier_pred_model, self.lr_tier_pred_model,\
+    #            self.epoch_tier_policy, self.lr_tier_policy
 
-    def _cal_policy_param_tier(self, kld, avg_clipped_distance):
-        if kld < self.kld_policy_range[0] and avg_clipped_distance < 0.02: tier_adj = -1
-        elif kld > self.kld_policy_range[1] or avg_clipped_distance > 0.04: tier_adj = 1
-        else: tier_adj = 0
+    # def _cal_pred_model_param_tier(self, kld):
+    #     if kld < self.kld_range[0]: tier_adj = -1
+    #     elif kld > self.kld_range[1]: tier_adj = 1
+    #     else: tier_adj = 0
 
-        # self.epoch_tier_policy = clamp(
-        #     self.epoch_tier_policy + tier_adj, 0, len(self.epoch_tier) - 1)
-        self.lr_tier_policy = clamp(
-            self.lr_tier_policy + tier_adj, 0, 2)
+    #     # self.epoch_tier_pred_model = clamp(
+    #     #     self.epoch_tier_pred_model + tier_adj, 0, len(self.epoch_tier) - 1)
+    #     self.lr_tier_pred_model = clamp(
+    #         self.lr_tier_pred_model + tier_adj, 0, len(self.lr_tier) - 1)
 
+    # def _cal_policy_param_tier(self, kld, avg_clipped_distance):
+    #     if kld < self.kld_policy_range[0] and avg_clipped_distance < 0.02: tier_adj = -1
+    #     elif kld > self.kld_policy_range[1] or avg_clipped_distance > 0.04: tier_adj = 1
+    #     else: tier_adj = 0
+
+    #     # self.epoch_tier_policy = clamp(
+    #     #     self.epoch_tier_policy + tier_adj, 0, len(self.epoch_tier) - 1)
+    #     self.lr_tier_policy = clamp(
+    #         self.lr_tier_policy + tier_adj, 0, len(self.lr_tier) - 1)
+
+    def sched_step(self, loss_log: dict, ep: int):
+        if self.do_lr_sched:
+            kld_loss, kld_policy, clipfrac = \
+                loss_log["kld_loss"], loss_log["kld_policy"], loss_log["avg_clipped_distance"]
+
+            if self.learning_mode == "separate":
+                self.schedulers["pred_model"].step(kld_loss)
+                # self.schedulers["policy"].step()
+                self._lr_adapter_policy(kld_policy, clipfrac)
+
+    def _lr_adapter_policy(self, kld, clipfrac,
+            target_kl=0.01, low=5e-5, high=1e-3, down=0.8, up=1.05):
+        for g in self.optimizers["policy"].param_groups:
+            lr = g["lr"]
+            if kld > 1.5 * target_kl or clipfrac > 0.5:
+                lr *= down
+            elif kld < 0.5 * target_kl and clipfrac < 0.1:
+                lr *= up
+            g["lr"] = min(max(lr, low), high)
     # endregion
