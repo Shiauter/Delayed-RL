@@ -9,6 +9,8 @@ from actor_vrnn_v2 import Actor
 from util import Memory, clamp
 from config import Config
 
+EPS = 1e-6
+
 class Learner:
     # region config args
     # env
@@ -29,14 +31,12 @@ class Learner:
     gate_reg_weight_to_set: float
     set_gate_reg_weight_at_ep: int
     eps_clip: float
-    # kld_policy_range: list
 
     # pred_model
     p_iters: int
     z_size: int
     reconst_loss_method: str
     pause_update_ep: int
-    # kld_range: list
     joint_elbo_weight: float
 
     # training params
@@ -48,14 +48,6 @@ class Learner:
     lr_joint: float
     lr_pred_model: float
     lr_policy: float
-    # epoch_tier_joint: int
-    # epoch_tier_policy: int
-    # epoch_tier_pred_model: int
-    # lr_tier_joint: int
-    # lr_tier_policy: int
-    # lr_tier_pred_model: int
-    # epoch_tier: list
-    # lr_tier: list
     do_lr_sched: bool
     device: str
     # endregion
@@ -204,7 +196,8 @@ class Learner:
         advantage, return_target = self._cal_advantage(v_s, r, v_prime, done)
 
         pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
-        ratio = torch.exp(torch.log(pi_a) - torch.log(prob_a))  # a/b == exp(log(a)-log(b))
+        log_pi_a, log_prob_a = torch.log(pi_a), torch.log(prob_a)
+        ratio = torch.exp(log_pi_a - log_prob_a)  # a/b == exp(log(a)-log(b))
 
         surr1 = ratio * advantage
         surr2 = torch.clamp(ratio, 1 - self.eps_clip, 1 + self.eps_clip) * advantage
@@ -220,20 +213,21 @@ class Learner:
         ).abs()
         avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
-        critic_loss = F.smooth_l1_loss(v_s, return_target.detach())
+        critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
 
         entropy = Categorical(pi).entropy().mean()
-        entropy_bonus = -entropy
+        entropy_bonus = -self.entropy_weight * entropy
 
-        kl_div = (torch.log(prob_a) - torch.log(pi_a)).mean()
-        advtg_mean = advantage.mean()
-        advtg_std = advantage.std()
-        advtg_min, advtg_max = advantage.min(), advantage.max()
+        with torch.no_grad():
+            kl_div = (log_prob_a - log_pi_a).mean()
+            advtg_mean = advantage.mean()
+            advtg_std = advantage.std()
+            advtg_min, advtg_max = advantage.min(), advantage.max()
 
-        v_s_std = v_s.std()
-        v_s_mean = v_s.mean()
-        td_target_std = return_target.std()
-        td_target_mean = return_target.mean()
+            v_s_std = v_s.std()
+            v_s_mean = v_s.mean()
+            td_target_std = return_target.std()
+            td_target_mean = return_target.mean()
 
         return policy_loss, critic_loss, entropy_bonus, kl_div, \
             advtg_mean, cliped_percentage, avg_clipped_distance, \
@@ -296,9 +290,7 @@ class Learner:
                     clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
                     v_s_std, td_target_std, v_s_mean, td_target_mean = \
                         self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
-                    ppo_loss = policy_loss + \
-                        self.critic_weight * critic_loss + \
-                        self.entropy_weight * entropy_bonus
+                    ppo_loss = policy_loss + critic_loss + entropy_bonus
                     total_ppo_loss.append(ppo_loss)
 
                     loss_log["policy_loss"].append(policy_loss)
@@ -344,9 +336,7 @@ class Learner:
                     clipped_percentage, avg_clipped_distance, advtg_std, advtg_min, advtg_max, \
                     v_s_std, td_target_std, v_s_mean, td_target_mean = \
                         self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
-                    ppo_loss = policy_loss + \
-                        self.critic_weight * critic_loss + \
-                        self.entropy_weight * entropy_bonus
+                    ppo_loss = policy_loss + critic_loss + entropy_bonus
                     total_ppo_loss.append(ppo_loss)
 
                     loss_log["policy_loss"].append(policy_loss)
@@ -463,71 +453,24 @@ class Learner:
         schedulers = {}
         if self.learning_mode == "joint":
             schedulers["joint"] = sched.ReduceLROnPlateau(
-                self.optimizers["joint"], mode='min', factor=0.5, patience=6,
+                self.optimizers["joint"], mode='min', factor=0.2, patience=6,
                 threshold=1e-3, threshold_mode='rel',
                 cooldown=2, min_lr=5e-5, verbose=True
             )
         elif self.learning_mode == "separate":
             schedulers["pred_model"] = sched.ReduceLROnPlateau(
-                self.optimizers["pred_model"], mode='min', factor=0.5, patience=6,
+                self.optimizers["pred_model"], mode='min', factor=0.2, patience=6,
                 threshold=1e-3, threshold_mode='rel',
                 cooldown=2, min_lr=5e-5, verbose=True
             )
             schedulers["policy"] = sched.LambdaLR(
                 self.optimizers["policy"],
-                lr_lambda=lambda u: 1.0 - min(u, config.K_epoch_training)/config.K_epoch_training
+                lr_lambda=lambda u: max(0.5, 1.0 - u / config.K_epoch_training)
             )
         else:
             raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
 
         return schedulers
-
-    # def adjust_learning_params(self, loss_log: dict, prev_loss_log: dict, ep: int):
-    #     if self.auto_tuning_param_tier:
-    #         kld, nll, advtg_mean, kld_policy, entropy, avg_clipped_distance = \
-    #             loss_log["kld_loss"], loss_log["nll_loss"], \
-    #             loss_log["advtg_mean"], loss_log["kld_policy"], \
-    #             loss_log["entropy_bonus"], loss_log["avg_clipped_distance"]
-
-    #         # prev_kld, prev_nll, prev_advtg_mean, prev_kld_policy, prev_entropy = \
-    #         #     prev_loss_log["kld_loss"], prev_loss_log["nll_loss"], \
-    #         #     prev_loss_log["advtg_mean"], prev_loss_log["kld_policy"], prev_loss_log["entropy_bonus"]
-
-    #         self._cal_pred_model_param_tier(kld)
-    #         self._cal_policy_param_tier(kld_policy, avg_clipped_distance)
-
-    #         if self.learning_mode == "separate":
-    #             for param_group in self.optimizers["pred_model"].param_groups:
-    #                 param_group['lr'] = self.lr_tier[self.lr_tier_pred_model]
-    #             for param_group in self.optimizers["policy"].param_groups:
-    #                 param_group['lr'] = self.lr_tier[self.lr_tier_policy]
-    #         # print(f"Param Tier -> pred_model: {pred_model_tier} / policy: {policy_tier}")
-
-    #         if ep == self.set_gate_reg_weight_at_ep:
-    #             self.gate_reg_weight = self.gate_reg_weight_to_set
-
-    #     return self.epoch_tier_pred_model, self.lr_tier_pred_model,\
-    #            self.epoch_tier_policy, self.lr_tier_policy
-
-    # def _cal_pred_model_param_tier(self, kld):
-    #     if kld < self.kld_range[0]: tier_adj = -1
-    #     elif kld > self.kld_range[1]: tier_adj = 1
-    #     else: tier_adj = 0
-
-    #     # self.epoch_tier_pred_model = clamp(
-    #     #     self.epoch_tier_pred_model + tier_adj, 0, len(self.epoch_tier) - 1)
-    #     self.lr_tier_pred_model = clamp(
-    #         self.lr_tier_pred_model + tier_adj, 0, len(self.lr_tier) - 1)
-
-    # def _cal_policy_param_tier(self, kld, avg_clipped_distance):
-    #     if kld < self.kld_policy_range[0] and avg_clipped_distance < 0.02: tier_adj = -1
-    #     elif kld > self.kld_policy_range[1] or avg_clipped_distance > 0.04: tier_adj = 1
-    #     else: tier_adj = 0
-
-    #     # self.epoch_tier_policy = clamp(
-    #     #     self.epoch_tier_policy + tier_adj, 0, len(self.epoch_tier) - 1)
-    #     self.lr_tier_policy = clamp(
-    #         self.lr_tier_policy + tier_adj, 0, len(self.lr_tier) - 1)
 
     def sched_step(self, loss_log: dict, ep: int):
         if self.do_lr_sched:
@@ -540,12 +483,12 @@ class Learner:
                 self._lr_adapter_policy(kld_policy, clipfrac)
 
     def _lr_adapter_policy(self, kld, clipfrac,
-            target_kl=0.01, low=5e-5, high=1e-3, down=0.8, up=1.05):
+            target_kl=0.01, low=5e-5, high=1e-3, down=0.8, up=1.2):
         for g in self.optimizers["policy"].param_groups:
             lr = g["lr"]
-            if kld > 1.5 * target_kl or clipfrac > 0.5:
-                lr *= down
-            elif kld < 0.5 * target_kl and clipfrac < 0.1:
+            if kld < 0.5 * target_kl and clipfrac < 0.02:
                 lr *= up
+            elif kld > 1.5 * target_kl or clipfrac > 0.04:
+                lr *= down
             g["lr"] = min(max(lr, low), high)
     # endregion

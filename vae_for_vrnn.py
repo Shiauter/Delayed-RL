@@ -164,7 +164,8 @@ class VAE(nn.Module):
     def _guassian_head(self, net, mean_layer, std_layer, *inputs):
         x = net(torch.cat(inputs, dim=-1))
         x_mean, x_std = mean_layer(x), std_layer(x)
-        x_std = F.softplus(x_std) + EPS
+        x_std = EPS + (1.0 - EPS) * F.sigmoid(x_std) # limited within [EPS, 1.0]
+        # x_std = F.softplus(x_std) + EPS
         if self.set_std_to_1:
             x_std = torch.ones_like(x_std)
         return x_mean, x_std

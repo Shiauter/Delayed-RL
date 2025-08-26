@@ -21,12 +21,8 @@ class Config:
     critic_weight: float = 0.7
     entropy_weight: float = 0.005
     advtg_norm: bool = True
-    gate_reg_weight: float = 0.0
-    gate_reg_weight_to_set: float = 0.0
-    set_gate_reg_weight_at_ep: int = 0
-    eps_clip: float = 0.2
+    eps_clip: float = 0.1
     policy_dropout: float = 0.0
-    # kld_policy_range: list = field(init=False)
 
     # pred_model
     p_iters: int = delay
@@ -37,32 +33,20 @@ class Config:
     pause_update_ep: int = None # only for separate learning
     set_std_to_1: bool = False
     z_source: str = "sampled" # mean, sampled
-    # kld_range: list = field(init=False)
     joint_elbo_weight: float = 0.5
 
     # training params
     learning_mode: str = "separate" # separate, joint
-    # lr_pred_model: float = field(init=False)
-    # lr_policy: float = field(init=False)
-    # lr: float = field(init=False)
     K_epoch_training: int = 300
     epoch_joint: int = 5
     epoch_pred_model: int = 5
     epoch_policy: int = 5
-    lr_joint: float = 3e-4
-    lr_pred_model: float = 3e-4
-    lr_policy: float = 3e-4
-    # epoch_tier_joint: int = 2
-    # epoch_tier_policy: int = 2
-    # epoch_tier_pred_model: int = 2
-    # lr_tier_joint: int = 2
-    # lr_tier_policy: int = 2
-    # lr_tier_pred_model: int = 2
+    lr_joint: float = 1e-3
+    lr_pred_model: float = 1e-3
+    lr_policy: float = 1e-3
     num_actors: int = 10
     num_memos: int = 10
     batch_size: int = 50 # for predicting s_ti
-    # epoch_tier: list = field(init=False)
-    # lr_tier: list = field(init=False)
     do_lr_sched: bool = True
     device: str = "cpu" # bug: GPU is slower than CPU
     do_save: bool = True
@@ -73,7 +57,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_08_29/vrnn_v2_add_scheduler2/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_08_29/vrnn_v2_scheduler_debug/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
@@ -86,13 +70,6 @@ class Config:
         env.close()
 
         self.h0 = [1, 1, self.hidden_size]
-
-        # self.epoch_tier = [1, 3, 5, 7, 9]
-        # self.lr_tier = [1e-3, 5e-4, 3e-4, 1e-4, 5e-5]
-
-        # # format -> from small to large
-        # self.kld_policy_range = [5e-3, 3e-2]
-        # self.kld_range = [0.3, 1.2]
 
     def get_json(self):
         config_dict = asdict(self)

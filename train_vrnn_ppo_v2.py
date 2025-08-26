@@ -86,7 +86,7 @@ def worker(env_name, config: Config, conn):
                     "states": s.tolist(),
                     "actions": [delay_a],
                     "probs": [prob[a].item()],
-                    "rewards": [r / config.reward_scale],
+                    "rewards": [r * config.reward_scale],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
                     "a_lsts": a_lst[:-1]
@@ -208,8 +208,6 @@ if __name__ == "__main__":
             learner.actor.load_params(model_state)
             loss_log, avg_loss_str = learner.learn(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
-            # epoch_tier_pred_model, lr_tier_pred_model, epoch_tier_policy, lr_tier_policy = \
-            #     learner.adjust_learning_params(loss_log, prev_loss_log, ep)
             learner.sched_step(loss_log, ep)
             prev_loss_log = loss_log
             model_state = learner.actor.output_params()
@@ -230,10 +228,6 @@ if __name__ == "__main__":
                 # log = merge_dict(pred_model_log, ppo_log)
                 log = loss_log
                 log["score"] = avg_score
-                # log["epoch_tier_pred_model"] = epoch_tier_pred_model
-                # log["epoch_tier_policy"] = epoch_tier_policy
-                # log["lr_tier_pred_model"] = lr_tier_pred_model
-                # log["lr_tier_policy"] = lr_tier_policy
                 for k, v in log.items():
                     if v is not None:
                         writer.add_scalar(k, v, ep)
