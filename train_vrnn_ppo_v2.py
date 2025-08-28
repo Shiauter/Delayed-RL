@@ -208,7 +208,7 @@ if __name__ == "__main__":
             learner.actor.load_params(model_state)
             loss_log, avg_loss_str = learner.learn(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
-            learner.sched_step(loss_log, ep)
+            lr_log = learner.sched_step(loss_log, ep)
             prev_loss_log = loss_log
             model_state = learner.actor.output_params()
             actor.load_params(model_state)
@@ -228,6 +228,9 @@ if __name__ == "__main__":
                 # log = merge_dict(pred_model_log, ppo_log)
                 log = loss_log
                 log["score"] = avg_score
+                for k in lr_log.keys():
+                    log[k] = lr_log[k]
+
                 for k, v in log.items():
                     if v is not None:
                         writer.add_scalar(k, v, ep)

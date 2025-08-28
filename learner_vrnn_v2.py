@@ -108,7 +108,7 @@ class Learner:
         for i in range(len(s)):
             kld, nll, mse, phi_x, phi_z, dec_std, z_vanishing_out = self.actor.pred_model.cal_loss(s[i], a[i], h)
             cond_in = torch.cat([phi_x, phi_z], dim=-1)
-            _, h = self.actor.rnn(cond_in, h)
+            _, h = self.actor.rnn(cond_in.detach(), h.detach())
 
             kld_loss.append(kld.squeeze())
             nll_loss.append(nll.squeeze())
@@ -196,7 +196,7 @@ class Learner:
         advantage, return_target = self._cal_advantage(v_s, r, v_prime, done)
 
         pi_a, prob_a = pi.gather(1, a[self.delay:]), prob_a[:len(prob_a) - self.delay]
-        log_pi_a, log_prob_a = torch.log(pi_a), torch.log(prob_a)
+        log_pi_a, log_prob_a = torch.log(pi_a.clamp_min(EPS)), torch.log(prob_a.clamp_min(EPS))
         ratio = torch.exp(log_pi_a - log_prob_a)  # a/b == exp(log(a)-log(b))
 
         surr1 = ratio * advantage
@@ -428,7 +428,7 @@ class Learner:
             optimizers["pred_model"] = optim.Adam(
                 [
                     {"params": self.actor.pred_model.parameters()},
-                    {"params": self.actor.rnn.parameters()}
+                    # {"params": self.actor.rnn.parameters()}
                 ],
                 lr=self.lr_pred_model
             )
@@ -436,7 +436,7 @@ class Learner:
                 [
                     {"params": self.actor.pred_model.enc_net.parameters()},
                     {"params": self.actor.pred_model.enc_mean.parameters()},
-                    {"params": self.actor.pred_model.enc_std.parameters()},
+                    # {"params": self.actor.pred_model.enc_std.parameters()},
                     {"params": self.actor.pred_model.phi_x.parameters()},
                     {"params": self.actor.pred_model.phi_z.parameters()},
                     {"params": self.actor.rnn.parameters()},
@@ -453,13 +453,13 @@ class Learner:
         schedulers = {}
         if self.learning_mode == "joint":
             schedulers["joint"] = sched.ReduceLROnPlateau(
-                self.optimizers["joint"], mode='min', factor=0.2, patience=6,
+                self.optimizers["joint"], mode='min', factor=0.5, patience=6,
                 threshold=1e-3, threshold_mode='rel',
                 cooldown=2, min_lr=5e-5, verbose=True
             )
         elif self.learning_mode == "separate":
             schedulers["pred_model"] = sched.ReduceLROnPlateau(
-                self.optimizers["pred_model"], mode='min', factor=0.2, patience=6,
+                self.optimizers["pred_model"], mode='min', factor=0.5, patience=6,
                 threshold=1e-3, threshold_mode='rel',
                 cooldown=2, min_lr=5e-5, verbose=True
             )
@@ -473,14 +473,18 @@ class Learner:
         return schedulers
 
     def sched_step(self, loss_log: dict, ep: int):
-        if self.do_lr_sched:
-            kld_loss, kld_policy, clipfrac = \
-                loss_log["kld_loss"], loss_log["kld_policy"], loss_log["avg_clipped_distance"]
+        if self.learning_mode == "separate":
+            if self.do_lr_sched:
+                nll_loss, kld_policy, clipfrac = \
+                    loss_log["nll_loss"], loss_log["kld_policy"], loss_log["avg_clipped_distance"]
 
-            if self.learning_mode == "separate":
-                self.schedulers["pred_model"].step(kld_loss)
+                self.schedulers["pred_model"].step(nll_loss)
                 # self.schedulers["policy"].step()
                 self._lr_adapter_policy(kld_policy, clipfrac)
+            return {
+                "lr_pred_model": self.optimizers["pred_model"].param_groups[0]['lr'],
+                "lr_policy": self.optimizers["policy"].param_groups[0]['lr']
+            }
 
     def _lr_adapter_policy(self, kld, clipfrac,
             target_kl=0.01, low=5e-5, high=1e-3, down=0.8, up=1.2):

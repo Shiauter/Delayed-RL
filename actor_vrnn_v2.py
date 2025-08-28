@@ -53,7 +53,7 @@ class Actor:
                 setattr(self, key, value)
 
         self.pred_model = VAE(
-            self.s_size, self.z_size, 1, self.hidden_size,
+            self.s_size, self.z_size, self.a_size, self.hidden_size,
             config.pred_s_source, config.nll_include_const, config.set_std_to_1,
             config.z_source
         )

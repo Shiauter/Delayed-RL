@@ -13,15 +13,15 @@ class Config:
     hidden_size: int = 32
     h0: list = field(init=False)
     T_horizon: int = 500
-    reward_scale: float = 1.0
+    reward_scale: float = 1 / 10.0
 
     # policy
     gamma: float = 0.99
     lmbda: float = 0.95
-    critic_weight: float = 0.7
+    critic_weight: float = 0.8
     entropy_weight: float = 0.005
-    advtg_norm: bool = True
-    eps_clip: float = 0.1
+    advtg_norm: bool = False
+    eps_clip: float = 0.2
     policy_dropout: float = 0.0
 
     # pred_model
@@ -32,14 +32,14 @@ class Config:
     nll_include_const: bool = True # only for nll
     pause_update_ep: int = None # only for separate learning
     set_std_to_1: bool = False
-    z_source: str = "sampled" # mean, sampled
+    z_source: str = "mean" # mean, sampled
     joint_elbo_weight: float = 0.5
 
     # training params
     learning_mode: str = "separate" # separate, joint
     K_epoch_training: int = 300
     epoch_joint: int = 5
-    epoch_pred_model: int = 5
+    epoch_pred_model: int = 3
     epoch_policy: int = 5
     lr_joint: float = 1e-3
     lr_pred_model: float = 1e-3
@@ -47,7 +47,7 @@ class Config:
     num_actors: int = 10
     num_memos: int = 10
     batch_size: int = 50 # for predicting s_ti
-    do_lr_sched: bool = True
+    do_lr_sched: bool = False
     device: str = "cpu" # bug: GPU is slower than CPU
     do_save: bool = True
     do_train: bool = True
@@ -57,7 +57,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_08_29/vrnn_v2_scheduler_debug/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_08_29/vrnn_v2_debug/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch

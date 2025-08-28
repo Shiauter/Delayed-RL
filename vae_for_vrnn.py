@@ -66,12 +66,14 @@ class VAE(nn.Module):
         )
 
     def dec(self, phi_z, a, h):
+        a = F.one_hot(a.long(), self.a_dim).view(*a.shape[:-1], self.a_dim).float()
         return self._guassian_head(
             self.dec_net, self.dec_mean, self.dec_std,
             phi_z, a, h
         )
 
     def prior(self, a, h):
+        a = F.one_hot(a.long(), self.a_dim).view(*a.shape[:-1], self.a_dim).float()
         return self._guassian_head(
             self.prior_net, self.prior_mean, self.prior_std,
             a, h
@@ -80,7 +82,7 @@ class VAE(nn.Module):
     def cal_loss(self, x, a, h):
         phi_x = self.phi_x(x) # truth state
         enc_mean, enc_std = self.enc(phi_x, h)
-        z_t = self._reparameterized_sample(enc_mean, enc_std)
+        z_t = self._reparameterized_sample(enc_mean, enc_std, "sampled")
         phi_z = self.phi_z(z_t)
         dec_mean, dec_std = self.dec(phi_z, a, h)
 
@@ -99,14 +101,14 @@ class VAE(nn.Module):
         with torch.no_grad():
             phi_x = self.phi_x(x) # truth state
             enc_mean, enc_std = self.enc(phi_x, h)
-            z_post = self._reparameterized_sample(enc_mean, enc_std)
+            z_post = self._reparameterized_sample(enc_mean, enc_std, self.z_source)
             phi_z_post = self.phi_z(z_post)
             dec_mean_post, dec_std_post = self.dec(phi_z_post, a, h)
             mse_post = ((x - dec_mean_post)**2).sum(-1).mean()
             nll_post = self._nll_gauss(dec_mean_post, dec_std_post, x).mean()
 
             prior_mean, prior_std = self.prior(a, h)
-            z_prior = self._reparameterized_sample(prior_mean, prior_std)
+            z_prior = self._reparameterized_sample(prior_mean, prior_std, self.z_source)
             phi_z_prior = self.phi_z(z_prior)
             dec_mean_prior, dec_std_prior = self.dec(phi_z_prior, a, h)
             mse_prior = ((x - dec_mean_prior)**2).sum(-1).mean()
@@ -141,7 +143,7 @@ class VAE(nn.Module):
 
         phi_x = self.phi_x(s_t)
         enc_mean, enc_std = self.enc(phi_x, h)
-        z_t = self._reparameterized_sample(enc_mean, enc_std)
+        z_t = self._reparameterized_sample(enc_mean, enc_std, self.z_source)
         phi_z = self.phi_z(z_t)
 
         return phi_x, phi_z
@@ -151,7 +153,7 @@ class VAE(nn.Module):
         # h = (batch, hidden_size)
 
         prior_mean, prior_std = self.prior(a, h)
-        z_t = self._reparameterized_sample(prior_mean, prior_std)
+        z_t = self._reparameterized_sample(prior_mean, prior_std, self.z_source)
         phi_z = self.phi_z(z_t)
 
         dec_mean, dec_std = self.dec(phi_z, a, h)
@@ -164,20 +166,20 @@ class VAE(nn.Module):
     def _guassian_head(self, net, mean_layer, std_layer, *inputs):
         x = net(torch.cat(inputs, dim=-1))
         x_mean, x_std = mean_layer(x), std_layer(x)
-        x_std = EPS + (1.0 - EPS) * F.sigmoid(x_std) # limited within [EPS, 1.0]
+        x_std = EPS + (1.0 - EPS) * torch.sigmoid(x_std) # limited within [EPS, 1.0]
         # x_std = F.softplus(x_std) + EPS
         if self.set_std_to_1:
             x_std = torch.ones_like(x_std)
         return x_mean, x_std
 
-    def _reparameterized_sample(self, mean, std):
-        if self.z_source == "sampled":
+    def _reparameterized_sample(self, mean, std, source: str = "mean"):
+        if source == "mean":
+            return mean
+        elif source == "sampled":
             eps = torch.randn_like(std)
             return mean + eps * std
-        elif self.z_source == "mean":
-            return mean
         else:
-            raise ValueError(f"Unknown z_source: {self.z_source}")
+            raise ValueError(f"Unknown z_source: {source}")
 
     def _kld_gauss(self, mean_1, std_1, mean_2, std_2):
         log_var_1 = 2 * torch.log(std_1 + EPS)
