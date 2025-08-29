@@ -92,10 +92,15 @@ class VAE(nn.Module):
         nll_loss = self._nll_gauss(dec_mean, dec_std, x)
         mse_loss = torch.pow(x - dec_mean, 2).sum(dim=-1)
 
-        z_vanishing_out = self._eval_z_usage(x, a, h)
-        return kld_loss, nll_loss, mse_loss, \
-            phi_x, phi_z, \
-            dec_std, z_vanishing_out
+        log = {
+            "kld_loss": kld_loss,
+            "nll_loss": nll_loss,
+            "mse_loss": mse_loss,
+            "dec_std": dec_std.mean(dim=-1)
+        }
+        log.update(self._eval_z_usage(x, a, h))
+
+        return phi_x, phi_z, log
 
     def _eval_z_usage(self, x, a, h):
         with torch.no_grad():

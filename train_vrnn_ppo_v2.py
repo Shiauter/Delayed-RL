@@ -175,7 +175,7 @@ if __name__ == "__main__":
     config = Config(env_name="CartPole-v1")
     actor = Actor(config)
     learner = Learner(config)
-    prev_loss_log = None
+    log_prev = None
 
 
     print()
@@ -206,10 +206,10 @@ if __name__ == "__main__":
         if do_train:
             print(f"> {'Training...':<30}", end=" ")
             learner.actor.load_params(model_state)
-            loss_log, avg_loss_str = learner.learn(memory_list, ep)
+            log, avg_loss_str = learner.learn(memory_list, ep)
             print(f"|| Avg Loss  : {avg_loss_str}")
-            lr_log = learner.sched_step(loss_log, ep)
-            prev_loss_log = loss_log
+            log_lr = learner.sched_step(log, ep)
+            log_prev = log
             model_state = learner.actor.output_params()
             actor.load_params(model_state)
 
@@ -225,11 +225,8 @@ if __name__ == "__main__":
             print(f"> Model is saved in \"{saved_path}\"")
 
             try:
-                # log = merge_dict(pred_model_log, ppo_log)
-                log = loss_log
                 log["score"] = avg_score
-                for k in lr_log.keys():
-                    log[k] = lr_log[k]
+                log.update(log_lr)
 
                 for k, v in log.items():
                     if v is not None:

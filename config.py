@@ -57,7 +57,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_08_29/vrnn_v2_debug/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_09_05/vrnn_v2_/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
