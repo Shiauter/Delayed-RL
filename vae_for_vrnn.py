@@ -79,7 +79,7 @@ class VAE(nn.Module):
             a, h
         )
 
-    def cal_loss(self, x, a, h):
+    def teacher_forcing(self, x, a, h):
         phi_x = self.phi_x(x) # truth state
         enc_mean, enc_std = self.enc(phi_x, h)
         z_t = self._reparameterized_sample(enc_mean, enc_std, "sampled")
@@ -100,6 +100,29 @@ class VAE(nn.Module):
         }
         log.update(self._eval_z_usage(x, a, h))
 
+        tf_cache = {
+            "enc_mean": enc_mean,
+            "enc_std": enc_std,
+            "h": h
+        }
+        return phi_x, phi_z, tf_cache, log
+
+    def overshooting(self, x, a, h, enc_mean, enc_std):
+        prior_mean, prior_std = self.prior(a, h) # pred state
+        z_t = self._reparameterized_sample(prior_mean, prior_std, self.z_source)
+        phi_z = self.phi_z(z_t)
+        dec_mean, dec_std = self.dec(phi_z, a, h)
+        phi_x = self.phi_x(dec_mean)
+
+        kld_loss = self._kld_gauss(enc_mean, enc_std, prior_mean, prior_std)
+        nll_loss = self._nll_gauss(dec_mean, dec_std, x)
+        mse_loss = torch.pow(x - dec_mean, 2).sum(dim=-1)
+
+        log = {
+            "kld_loss": kld_loss,
+            "nll_loss": nll_loss,
+            "mse_loss": mse_loss
+        }
         return phi_x, phi_z, log
 
     def _eval_z_usage(self, x, a, h):

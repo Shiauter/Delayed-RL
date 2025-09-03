@@ -60,6 +60,7 @@ def worker(env_name, config: Config, conn):
     env = gym.make(env_name)
     memory = Memory(config.T_horizon)
     done = False
+    t = 0
     try:
         while True:
             cmd, data = conn.recv()
@@ -82,6 +83,8 @@ def worker(env_name, config: Config, conn):
                 delay_a = a_lst[0]
                 s_prime, r, terminated, truncated, _ = env.step(delay_a)
                 done = terminated or truncated
+                # if t >= 1:
+                #     done = True
                 exp = {
                     "states": s.tolist(),
                     "actions": [delay_a],
@@ -89,7 +92,7 @@ def worker(env_name, config: Config, conn):
                     "rewards": [r * config.reward_scale],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
-                    "a_lsts": a_lst[:-1]
+                    "a_lsts": a_lst[:]
                 }
                 memory.store(**exp)
                 memory.set_hidden(h_in.detach())
@@ -100,6 +103,7 @@ def worker(env_name, config: Config, conn):
                 if len(copied_actions) > 0:
                     copied_actions.pop(0)
                 conn.send((s, a_lst, h_out, done)) # check h_in or h_out
+                t += 1
             elif cmd == "get_memo":
                 conn.send(memory)
             elif cmd == "close":

@@ -4,6 +4,7 @@ import torch.optim.lr_scheduler as sched
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import time
+from torchviz import make_dot
 
 from actor_vrnn_v2 import Actor
 from util import Memory, clamp
@@ -38,6 +39,7 @@ class Learner:
     reconst_loss_method: str
     pause_update_ep: int
     joint_elbo_weight: float
+    rollout_loss_weight: float
 
     # training params
     learning_mode: str
@@ -49,6 +51,7 @@ class Learner:
     lr_pred_model: float
     lr_policy: float
     do_lr_sched: bool
+    do_draw_graph: bool
     device: str
     # endregion
 
@@ -69,15 +72,49 @@ class Learner:
         return s, a, r, s_prime, done, prob_a, a_lst
 
     # region pred_model
-    def _cal_pred_model_loss(self, s, a_lsts, first_hidden, s_prime):
+    def _os_loop(self, s_all, a_lsts, tf_cache):
+        log = {
+            "kld_loss": [],
+            "nll_loss": [],
+            "mse_loss": []
+        }
+
+        a_lst = torch.split(a_lsts, 1, dim=1)
+        for t in range(len(tf_cache["h"]) - self.delay):
+            a = torch.split(a_lst[t], 1, dim=-1)
+            h_rollout = tf_cache["h"][t]
+            log_step = {
+                "kld_loss": 0,
+                "nll_loss": 0,
+                "mse_loss": 0
+            }
+            for i in range(len(a) - 1):
+                target_s = s_all[t + i + 1]
+                enc_mean, enc_std = tf_cache["enc_mean"][t + i], tf_cache["enc_std"][t + i]
+                phi_x, phi_z, log_rollout_step = self.actor.pred_model.overshooting(target_s, a[i], h_rollout, enc_mean, enc_std)
+                cond_in = torch.cat([phi_x, phi_z], dim=-1)
+                pred_o, h_rollout = self.actor.rnn(cond_in, h_rollout)
+
+            for k in log_step.keys():
+                log_step[k] += log_rollout_step[k]
+
+            for k in log.keys():
+                log[k].append(log_step[k])
+
+        for k in log.keys():
+            log[k] = torch.stack(log[k]).mean()
+        return log
+
+    def _tf_loop(self, s, a_lsts, first_hidden):
         # s       -> (batch=1, ep_len, s_size) # current s
         # a_lsts  -> (batch=1, ep_len, delay)
         # h       -> (seq_len=1, batch=1, hidden_size)
 
         # predicting one step future state using true state
-        s = torch.cat([s[:, 1:, :], s_prime[:, -1, :].unsqueeze(1)], dim=1).split(1, dim=1)
         a = torch.split(a_lsts, 1, dim=-1)[0].split(1, dim=1) # split into actions
-        h = first_hidden
+        phi_x, phi_z = self.actor.pred_model(s[0], first_hidden)
+        cond_in = torch.cat([phi_x, phi_z], dim=-1)
+        _, h = self.actor.rnn(cond_in.detach(), first_hidden.detach())
 
         log = {
             "kld_loss": [],
@@ -91,13 +128,23 @@ class Learner:
             "delta_nll_zero": [],
             "delta_nll_shuf": [],
         }
-        for i in range(len(s)):
-            phi_x, phi_z, log_step = self.actor.pred_model.cal_loss(s[i], a[i], h)
+
+        tf_cache = {
+            "enc_mean": [],
+            "enc_std": [],
+            "h": []
+        }
+        for t in range(1, len(s)):
+            phi_x, phi_z, tf_cache_step, log_step = \
+                self.actor.pred_model.teacher_forcing(s[t], a[t - 1], h)
             cond_in = torch.cat([phi_x, phi_z], dim=-1)
             _, h = self.actor.rnn(cond_in.detach(), h.detach())
 
             for k in log.keys():
                 log[k].append(log_step[k])
+
+            for k in tf_cache.keys():
+                tf_cache[k].append(tf_cache_step[k])
 
         dec_std_log = {
             "dec_std_mean": torch.stack(log["dec_std"]).mean(),
@@ -109,7 +156,18 @@ class Learner:
         del log["dec_std"]
         log.update(dec_std_log)
 
-        return log
+        return log, tf_cache
+
+    def _cal_pred_model_loss(self, s, a_lsts, first_hidden, s_prime):
+        s = torch.cat([s[:, :, :], s_prime[:, -1, :].unsqueeze(1)], dim=1).split(1, dim=1)
+        log_tf, tf_cache = self._tf_loop(s, a_lsts, first_hidden)
+
+        if self.delay > 0:
+            log_os = self._os_loop(s, a_lsts, tf_cache)
+            for k in log_os.keys():
+                log_tf[k] += self.rollout_loss_weight * log_os[k]
+
+        return log_tf
     # endregion
 
     # region policy
@@ -262,7 +320,7 @@ class Learner:
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                    log_pred_model = self._cal_pred_model_loss(s, a, first_hidden, s_prime)
+                    log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
                     if self.reconst_loss_method == "NLL":
                         total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["nll_loss"])
                     elif self.reconst_loss_method == "MSE":
@@ -313,6 +371,7 @@ class Learner:
                 log["ppo_loss"].append(total_ppo_loss)
                 # print(f"total_policy_loss: {total_ppo_loss} / ep. {epoch + 1}")
 
+                self._draw_graph(total_ppo_loss, self.actor, "ppo_loss")
                 self.optimizers["policy"].zero_grad()
                 total_ppo_loss.mean().backward()
                 self.optimizers["policy"].step()
@@ -325,7 +384,7 @@ class Learner:
                     s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
                     first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-                    log_pred_model = self._cal_pred_model_loss(s, a, first_hidden, s_prime)
+                    log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
                     if self.reconst_loss_method == "NLL":
                         total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["nll_loss"])
                     elif self.reconst_loss_method == "MSE":
@@ -339,6 +398,7 @@ class Learner:
                 # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
 
                 if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
+                    self._draw_graph(total_pred_model_loss, self.actor, "pred_model_loss")
                     self.optimizers["pred_model"].zero_grad()
                     total_pred_model_loss.mean().backward()
                     self.optimizers["pred_model"].step()
@@ -374,7 +434,7 @@ class Learner:
             optimizers["pred_model"] = optim.Adam(
                 [
                     {"params": self.actor.pred_model.parameters()},
-                    # {"params": self.actor.rnn.parameters()}
+                    {"params": self.actor.rnn.parameters()}
                 ],
                 lr=self.lr_pred_model
             )
@@ -382,7 +442,6 @@ class Learner:
                 [
                     {"params": self.actor.pred_model.enc_net.parameters()},
                     {"params": self.actor.pred_model.enc_mean.parameters()},
-                    # {"params": self.actor.pred_model.enc_std.parameters()},
                     {"params": self.actor.pred_model.phi_x.parameters()},
                     {"params": self.actor.pred_model.phi_z.parameters()},
                     {"params": self.actor.rnn.parameters()},
@@ -441,4 +500,24 @@ class Learner:
             elif kld > 1.5 * target_kl or clipfrac > 0.04:
                 lr *= down
             g["lr"] = min(max(lr, low), high)
+
+    def _collect_param_dict(self, actor: Actor):
+        param_dict = {}
+
+        submods = []
+        if hasattr(actor, "pred_model"): submods.append(("pred", actor.pred_model))
+        if hasattr(actor, "rnn"):        submods.append(("rnn", actor.rnn))
+        if hasattr(actor, "policy"):     submods.append(("policy", actor.policy))
+
+        for prefix, mod in submods:
+            if hasattr(mod, "named_parameters"):
+                for n, p in mod.named_parameters(recurse=True):
+                    param_dict[f"{prefix}.{n}"] = p
+        return param_dict
+
+    def _draw_graph(self, loss, actor, fname):
+        if self.do_draw_graph:
+            params = self._collect_param_dict(actor)
+            dot = make_dot(loss, params=params)
+            dot.save(f"{fname}.dot")
     # endregion

@@ -18,7 +18,7 @@ class Config:
     # policy
     gamma: float = 0.99
     lmbda: float = 0.95
-    critic_weight: float = 0.8
+    critic_weight: float = 0.7
     entropy_weight: float = 0.005
     advtg_norm: bool = False
     eps_clip: float = 0.2
@@ -34,6 +34,7 @@ class Config:
     set_std_to_1: bool = False
     z_source: str = "mean" # mean, sampled
     joint_elbo_weight: float = 0.5
+    rollout_loss_weight: float = 1.0
 
     # training params
     learning_mode: str = "separate" # separate, joint
@@ -48,6 +49,7 @@ class Config:
     num_memos: int = 10
     batch_size: int = 50 # for predicting s_ti
     do_lr_sched: bool = False
+    do_draw_graph: bool = False
     device: str = "cpu" # bug: GPU is slower than CPU
     do_save: bool = True
     do_train: bool = True
@@ -57,7 +59,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_09_05/vrnn_v2_/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_09_05/vrnn_v2_baseline3/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch
@@ -70,6 +72,7 @@ class Config:
         env.close()
 
         self.h0 = [1, 1, self.hidden_size]
+        self.p_iters = self.delay
 
     def get_json(self):
         config_dict = asdict(self)
