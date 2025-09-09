@@ -101,9 +101,9 @@ class VAE(nn.Module):
         log.update(self._eval_z_usage(x, a, h))
 
         tf_cache = {
-            "enc_mean": enc_mean,
-            "enc_std": enc_std,
-            "h": h
+            "enc_mean": enc_mean.detach(),
+            "enc_std": enc_std.detach(),
+            "h": h.detach()
         }
         return phi_x, phi_z, tf_cache, log
 
@@ -119,11 +119,23 @@ class VAE(nn.Module):
         mse_loss = torch.pow(x - dec_mean, 2).sum(dim=-1)
 
         log = {
+            "kld_loss_os": kld_loss,
+            "nll_loss_os": nll_loss,
+            "mse_loss_os": mse_loss
+        }
+        return phi_x, phi_z, log
+
+    def cal_loss(self, x, enc_mean, enc_std, prior_mean, prior_std, dec_mean, dec_std):
+        kld_loss = self._kld_gauss(enc_mean, enc_std, prior_mean, prior_std)
+        nll_loss = self._nll_gauss(dec_mean, dec_std, x)
+        mse_loss = torch.pow(x - dec_mean, 2).sum(dim=-1)
+
+        log = {
             "kld_loss": kld_loss,
             "nll_loss": nll_loss,
             "mse_loss": mse_loss
         }
-        return phi_x, phi_z, log
+        return log
 
     def _eval_z_usage(self, x, a, h):
         with torch.no_grad():

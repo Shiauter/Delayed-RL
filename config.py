@@ -9,19 +9,20 @@ class Config:
     env_seed: int = None
     s_size: int = field(init=False)
     a_size: int = field(init=False)
-    delay: int = 0
+    delay: int = 1
     hidden_size: int = 32
     h0: list = field(init=False)
     T_horizon: int = 500
-    reward_scale: float = 1 / 10.0
+    reward_scale: float = 1e-2
 
     # policy
     gamma: float = 0.99
     lmbda: float = 0.95
     critic_weight: float = 0.7
-    entropy_weight: float = 0.005
+    entropy_weight: float = 5e-3
     advtg_norm: bool = False
-    eps_clip: float = 0.2
+    eps_clip: float = 0.1
+    eps_clip_value: float = 0.1
     policy_dropout: float = 0.0
 
     # pred_model
@@ -59,7 +60,7 @@ class Config:
     experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_09_05/vrnn_v2_baseline3/{experiment_name}"
+    log_dir = f"{log_root}/meeting_2025_09_05/vrnn_v2_baseline4/{experiment_name}"
     saved_folder = f"{model_root}/{experiment_name}"
     record_dir =f"{saved_folder}/records"
     record_interval: int = 10 # every n epoch

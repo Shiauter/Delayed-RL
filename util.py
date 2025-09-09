@@ -48,7 +48,7 @@ class Memory:
         self.keys = [
             "states", "actions", "probs", "rewards",
             "states_prime", "dones",
-            "timesteps", "a_lsts"
+            "a_lsts", "values"
         ]
         self.max_seq_len = max_seq_len
         self.h0 = None

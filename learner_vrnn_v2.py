@@ -32,6 +32,7 @@ class Learner:
     gate_reg_weight_to_set: float
     set_gate_reg_weight_at_ep: int
     eps_clip: float
+    eps_clip_value: float
 
     # pred_model
     p_iters: int
@@ -65,28 +66,28 @@ class Learner:
         self.schedulers: dict = self._init_sched(config)
 
     def _make_batch(self, memory: Memory):
-        s, a, prob_a, r, s_prime, done, t, a_lst = \
+        s, a, prob_a, r, s_prime, done, a_lst, v = \
             map(lambda key: torch.tensor(memory.exps[key]).unsqueeze(0).to(self.device).detach(), memory.keys)
 
         # (batch=1, ep_len, data_size)
-        return s, a, r, s_prime, done, prob_a, a_lst
+        return s, a, r, s_prime, done, prob_a, a_lst, v
 
     # region pred_model
     def _os_loop(self, s_all, a_lsts, tf_cache):
         log = {
-            "kld_loss": [],
-            "nll_loss": [],
-            "mse_loss": []
+            "kld_loss_os": [],
+            "nll_loss_os": [],
+            "mse_loss_os": []
         }
 
         a_lst = torch.split(a_lsts, 1, dim=1)
         for t in range(len(tf_cache["h"]) - self.delay):
             a = torch.split(a_lst[t], 1, dim=-1)
-            h_rollout = tf_cache["h"][t]
+            h_rollout = tf_cache["h"][t].detach()
             log_step = {
-                "kld_loss": 0,
-                "nll_loss": 0,
-                "mse_loss": 0
+                "kld_loss_os": 0,
+                "nll_loss_os": 0,
+                "mse_loss_os": 0
             }
             for i in range(len(a) - 1):
                 target_s = s_all[t + i + 1]
@@ -95,8 +96,8 @@ class Learner:
                 cond_in = torch.cat([phi_x, phi_z], dim=-1)
                 pred_o, h_rollout = self.actor.rnn(cond_in, h_rollout)
 
-            for k in log_step.keys():
-                log_step[k] += log_rollout_step[k]
+                for k in log_step.keys():
+                    log_step[k] += log_rollout_step[k]
 
             for k in log.keys():
                 log[k].append(log_step[k])
@@ -112,7 +113,7 @@ class Learner:
 
         # predicting one step future state using true state
         a = torch.split(a_lsts, 1, dim=-1)[0].split(1, dim=1) # split into actions
-        phi_x, phi_z = self.actor.pred_model(s[0], first_hidden)
+        phi_x, phi_z = self.actor.pred_model(s[0], first_hidden.detach())
         cond_in = torch.cat([phi_x, phi_z], dim=-1)
         _, h = self.actor.rnn(cond_in.detach(), first_hidden.detach())
 
@@ -136,7 +137,7 @@ class Learner:
         }
         for t in range(1, len(s)):
             phi_x, phi_z, tf_cache_step, log_step = \
-                self.actor.pred_model.teacher_forcing(s[t], a[t - 1], h)
+                self.actor.pred_model.teacher_forcing(s[t], a[t - 1], h.detach())
             cond_in = torch.cat([phi_x, phi_z], dim=-1)
             _, h = self.actor.rnn(cond_in.detach(), h.detach())
 
@@ -164,10 +165,9 @@ class Learner:
 
         if self.delay > 0:
             log_os = self._os_loop(s, a_lsts, tf_cache)
-            for k in log_os.keys():
-                log_tf[k] += self.rollout_loss_weight * log_os[k]
+            log_tf.update(log_os)
 
-        return log_tf
+        return log_tf, (s, a_lsts, tf_cache)
     # endregion
 
     # region policy
@@ -216,7 +216,7 @@ class Learner:
             res[k] = torch.cat(res[k], dim=1).squeeze(0)
         return res["pi"], res["v"], second_hidden
 
-    def _cal_ppo_loss(self, s, s_prime, a, prob_a, r, done, a_lst, first_hidden):
+    def _cal_ppo_loss(self, s, s_prime, a, prob_a, r, done, a_lst, first_hidden, v_old):
         # s       -> (batch=1, ep_len, s_size)
         # s_prime -> (batch=1, ep_len, s_size)
         # a       -> (batch=1, ep_len, a_size=1)
@@ -227,7 +227,7 @@ class Learner:
         # first_hidden -> (seq_len=1, batch=1, hidden_size)
 
         # remove batch dimension
-        a, prob_a, r, done = a.squeeze(0), prob_a.squeeze(0), r.squeeze(0), done.squeeze(0)
+        a, prob_a, r, done, v_old = a.squeeze(0), prob_a.squeeze(0), r.squeeze(0), done.squeeze(0), v_old.squeeze(0)
         empty_a_lst = torch.zeros_like(a_lst[0]).unsqueeze(0)
         a_lst_prime = torch.cat([a_lst[:, 1:], empty_a_lst], dim=1)
 
@@ -253,7 +253,15 @@ class Learner:
         ).abs()
         avg_clipped_distance = clipped_distances.mean() if num_clipped > 0 else torch.tensor(0.0)
 
-        critic_loss = self.critic_weight * F.smooth_l1_loss(v_s, return_target.detach())
+        v_old = v_old[:len(v_old) - self.delay]
+        v_clip = v_old +(v_s - v_old).clamp(-self.eps_clip_value, self.eps_clip_value)
+        vf1 = F.smooth_l1_loss(v_s, return_target.detach())
+        vf2 = F.smooth_l1_loss(v_clip, return_target.detach())
+        critic_loss = self.critic_weight * torch.max(vf1, vf2).mean()
+        delta_v = v_s - v_old
+        v_clipped_mask = (delta_v.abs() > self.eps_clip_value)
+        v_clipped_persentage = v_clipped_mask.float().mean()
+        avg_clipped_value = torch.clamp(delta_v.abs() - self.eps_clip_value, min=0).mean()
 
         entropy = Categorical(pi).entropy().mean()
         entropy_bonus = -self.entropy_weight * entropy
@@ -283,7 +291,9 @@ class Learner:
             "v_s_std": v_s_std,
             "v_s_mean": v_s_mean,
             "td_target_std": td_target_std,
-            "td_target_mean": td_target_mean
+            "td_target_mean": td_target_mean,
+            "v_clipped_persentage": v_clipped_persentage,
+            "avg_clipped_value": avg_clipped_value
         }
 
         return log
@@ -304,7 +314,8 @@ class Learner:
             "entropy_bonus", "kld_policy", "advtg_mean",
             "clipped_percentage", "avg_clipped_distance",
             "advtg_std", "advtg_min", "advtg_max", "v_s_std",
-            "td_target_std", "v_s_mean", "td_target_mean"
+            "td_target_std", "v_s_mean", "td_target_mean",
+            "v_clipped_persentage", "avg_clipped_value"
         ]
 
         log = {}
@@ -317,7 +328,7 @@ class Learner:
             for epoch in range(self.epoch_joint):
                 total_pred_model_loss, total_ppo_loss = [], []
                 for i in range(self.num_memos):
-                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
+                    s, a, r, s_prime, done, prob_a, a_lst, v = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
 
                     log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
@@ -329,7 +340,7 @@ class Learner:
                     for k in log_pred_model.keys():
                         log[k].append(log_pred_model[k])
 
-                    log_policy = self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
+                    log_policy = self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden, v)
                     ppo_loss = log_policy["policy_loss"] + log_policy["critic_loss"] + log_policy["entropy_bonus"]
                     total_ppo_loss.append(ppo_loss)
 
@@ -357,10 +368,10 @@ class Learner:
             for epoch in range(self.epoch_policy):
                 total_ppo_loss = []
                 for i in range(self.num_memos):
-                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i])
+                    s, a, r, s_prime, done, prob_a, a_lst, v = self._make_batch(memory_list[i])
                     first_hidden = memory_list[i].h0.detach().to(self.device)
 
-                    log_policy = self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden)
+                    log_policy = self._cal_ppo_loss(s, s_prime, a, prob_a, r, done, a_lst, first_hidden, v)
                     ppo_loss = log_policy["policy_loss"] + log_policy["critic_loss"] + log_policy["entropy_bonus"]
                     total_ppo_loss.append(ppo_loss)
 
@@ -373,25 +384,41 @@ class Learner:
 
                 self._draw_graph(total_ppo_loss, self.actor, "ppo_loss")
                 self.optimizers["policy"].zero_grad()
+                self.optimizers["pred_model"].zero_grad()
+                self.optimizers["rnn"].zero_grad()
                 total_ppo_loss.mean().backward()
                 self.optimizers["policy"].step()
+                self.optimizers["pred_model"].step()
+                self.optimizers["rnn"].step()
             # print(f"policy training: {time.time() - check_point} sec.")
 
             check_point = time.time()
             for epoch in range(self.epoch_pred_model):
                 total_pred_model_loss = []
+                rollout_input_all = []
                 for i in range(self.num_memos):
-                    s, a, r, s_prime, done, prob_a, a_lst = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
+                    s, a, r, s_prime, done, prob_a, a_lst, _ = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
                     first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-                    log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
+                    log_pred_model, rollout_input = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
                     if self.reconst_loss_method == "NLL":
-                        total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["nll_loss"])
+                        total_pred_model_loss.append(
+                            log_pred_model["kld_loss"] + log_pred_model["nll_loss"]
+                        )
                     elif self.reconst_loss_method == "MSE":
-                        total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["mse_loss"])
+                        total_pred_model_loss.append(
+                            log_pred_model["kld_loss"] + log_pred_model["mse_loss"]
+                        )
 
-                    for k in log_pred_model.keys():
-                        log[k].append(log_pred_model[k])
+                    rollout_input_all.append(rollout_input)
+                    # if self.delay > 0:
+                    #     total_pred_model_loss_os.append(
+                    #         log_pred_model["kld_loss_os"] + log_pred_model["nll_loss_os"]
+                    #     )
+
+                    for k in log.keys():
+                        if k in log_pred_model:
+                            log[k].append(log_pred_model[k])
 
                 total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
                 log["pred_model_loss"].append(total_pred_model_loss)
@@ -399,9 +426,27 @@ class Learner:
 
                 if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
                     self._draw_graph(total_pred_model_loss, self.actor, "pred_model_loss")
+                    # tf
                     self.optimizers["pred_model"].zero_grad()
                     total_pred_model_loss.mean().backward()
                     self.optimizers["pred_model"].step()
+
+                    # os
+                    if self.delay > 0:
+                        total_pred_model_loss_os = []
+                        for i, data in enumerate(rollout_input_all):
+                            log_os = self._os_loop(data[0], data[1], data[2])
+                            total_pred_model_loss_os.append(
+                                log_os["kld_loss_os"] + log_os["nll_loss_os"]
+                            )
+
+                        self.optimizers["pred_model"].zero_grad()
+                        self.optimizers["rnn"].zero_grad()
+                        total_pred_model_loss_os = torch.stack(total_pred_model_loss_os).mean() * self.rollout_loss_weight
+                        total_pred_model_loss_os.mean().backward()
+                        self.optimizers["pred_model"].step()
+                        self.optimizers["rnn"].step()
+
             # print(f"pred_model training: {time.time() - check_point} sec.")
             avg_loss_str = f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
         # endregion
@@ -434,18 +479,24 @@ class Learner:
             optimizers["pred_model"] = optim.Adam(
                 [
                     {"params": self.actor.pred_model.parameters()},
-                    {"params": self.actor.rnn.parameters()}
+                    # {"params": self.actor.rnn.parameters()}
                 ],
                 lr=self.lr_pred_model
             )
             optimizers["policy"] = optim.Adam(
                 [
-                    {"params": self.actor.pred_model.enc_net.parameters()},
-                    {"params": self.actor.pred_model.enc_mean.parameters()},
-                    {"params": self.actor.pred_model.phi_x.parameters()},
-                    {"params": self.actor.pred_model.phi_z.parameters()},
-                    {"params": self.actor.rnn.parameters()},
+                    # {"params": self.actor.pred_model.enc_net.parameters()},
+                    # {"params": self.actor.pred_model.enc_mean.parameters()},
+                    # {"params": self.actor.pred_model.phi_x.parameters()},
+                    # {"params": self.actor.pred_model.phi_z.parameters()},
+                    # {"params": self.actor.rnn.parameters()},
                     {"params": self.actor.policy.parameters()}
+                ],
+                lr=self.lr_policy
+            )
+            optimizers["rnn"] = optim.Adam(
+                [
+                    {"params": self.actor.rnn.parameters()}
                 ],
                 lr=self.lr_policy
             )

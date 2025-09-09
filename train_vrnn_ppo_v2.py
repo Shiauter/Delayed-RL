@@ -74,7 +74,7 @@ def worker(env_name, config: Config, conn):
 
             elif cmd == "step":
                 h_in = h_out
-                a, prob, h_out, _ = data
+                a, prob, h_out, v = data
                 prob = prob.view(-1)
                 a = a.item()
                 # a = 0 if len(copied_actions) == 0 else copied_actions[0][0]
@@ -92,7 +92,8 @@ def worker(env_name, config: Config, conn):
                     "rewards": [r * config.reward_scale],
                     "states_prime": s_prime.tolist(),
                     "dones": [0 if done else 1],
-                    "a_lsts": a_lst[:]
+                    "a_lsts": a_lst[:],
+                    "values": [v.item()]
                 }
                 memory.store(**exp)
                 memory.set_hidden(h_in.detach())
@@ -136,12 +137,13 @@ def event_loop(config: Config, actor: Actor):
             for obs in observations:
                 if obs is not None:
                     s, a_lst, h_in, done = obs
-                    a, prob, h_out, _ = actor.sample_action(
-                        torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
-                        torch.tensor(a_lst).view(1, 1, -1),
-                        h_in
-                    )
-                    actions.append((a.detach(), prob.detach(), h_out.detach(), done))
+                    with torch.no_grad():
+                        a, prob, h_out, v = actor.sample_action(
+                            torch.from_numpy(s).view(1, 1, -1), # (seq_len, batch, s_size)
+                            torch.tensor(a_lst).view(1, 1, -1),
+                            h_in
+                        )
+                    actions.append((a, prob, h_out, v))
                 else:
                     actions.append(None)
 
