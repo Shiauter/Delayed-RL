@@ -185,7 +185,12 @@ if __name__ == "__main__":
 
 
     print()
-    print(f"* Experiment: {config.experiment_name}\n")
+    print(f"* Log Directory: {config.log_dir}")
+    print(f"* Experiment   : {config.experiment_name}\n")
+    user_input = input("> Ready to proceed? (y/[n]): ")
+    if user_input == "y": pass
+    else: raise SystemExit("> The program has stopped.")
+    print()
 
     do_save = config.do_save
     do_train = config.do_train

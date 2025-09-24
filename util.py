@@ -106,11 +106,11 @@ def clear_dir(dir: str):
     try:
         user_input = input(
             f"> Found existing directory - \"{dir}\" \n" + \
-            "> Clear and continue？ (y/[n]): "
+            "> Clear and continue? (y/[n]): "
         ).strip().lower()
         if user_input == 'y':
             shutil.rmtree(dir)
-            print("> Directory is cleared.")
+            print("> Directory is cleared.\n")
             os.makedirs(dir)
         else:
             raise SystemExit("> The program has stopped.")

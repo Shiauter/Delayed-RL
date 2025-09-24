@@ -9,19 +9,19 @@ from config import Config
 class Policy(nn.Module):
     def __init__(self, input_dim, out_dim):
         super().__init__()
-        # h_dim = input_dim * 2
-        # self.fc1 = nn.Linear(input_dim, h_dim)
-        self.fc_pi = nn.Linear(input_dim, out_dim)
-        self.fc_v  = nn.Linear(input_dim, 1)
+        h_dim = max(64, input_dim * 2)
+        self.fc1 = nn.Linear(input_dim, h_dim)
+        self.fc_pi = nn.Linear(h_dim, out_dim)
+        self.fc_v  = nn.Linear(h_dim, 1)
 
     def pi(self, x):
-        # x = F.relu(self.fc1(x))
+        x = F.relu(self.fc1(x))
         x = self.fc_pi(x)
         prob = F.softmax(x, dim=-1)
         return prob
 
     def v(self, x):
-        # x = F.relu(self.fc1(x))
+        x = F.relu(self.fc1(x))
         v = self.fc_v(x)
         return v
 
@@ -55,10 +55,10 @@ class Actor:
         self.pred_model = VAE(
             self.s_size, self.z_size, self.a_size, self.hidden_size,
             config.pred_s_source, config.nll_include_const, config.set_std_to_1,
-            config.z_source
+            config.z_source, config.max_std
         )
         self.rnn = RNN(self.s_size + self.z_size, 64, self.hidden_size)
-        self.policy = Policy(self.hidden_size, self.a_size)
+        self.policy = Policy(self.hidden_size + self.s_size, self.a_size)
 
     def set_device(self, device: str):
         self.rnn.to(device)
@@ -79,8 +79,9 @@ class Actor:
 
     def sample_action(self, s, a_lst, h_in):
         o, h_out = self.pred_present(s, a_lst, h_in)
-        pi = self.policy.pi(o)
-        v = self.policy.v(o)
+        x = torch.cat([o, s], dim=-1)
+        pi = self.policy.pi(x)
+        v = self.policy.v(x)
         action = Categorical(pi).sample()
         return action, pi, h_out, v
 

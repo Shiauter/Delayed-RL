@@ -7,7 +7,7 @@ EPS = 1e-6
 LOG_2PI = math.log(2 * math.pi)
 
 class VAE(nn.Module):
-    def __init__(self, x_dim, z_dim, a_dim, h_dim, pred_s_source: str, nll_include_const: bool, set_std_to_1: bool, z_source: str):
+    def __init__(self, x_dim, z_dim, a_dim, h_dim, pred_s_source: str, nll_include_const: bool, set_std_to_1: bool, z_source: str, max_std: float):
         super().__init__()
 
         self.x_dim = x_dim
@@ -18,6 +18,7 @@ class VAE(nn.Module):
         self.nll_include_const = nll_include_const
         self.set_std_to_1 = set_std_to_1
         self.z_source = z_source
+        self.max_std = max_std
 
         self.phi_x = nn.Sequential(
             nn.Linear(x_dim, h_dim),
@@ -66,14 +67,14 @@ class VAE(nn.Module):
         )
 
     def dec(self, phi_z, a, h):
-        a = F.one_hot(a.long(), self.a_dim).view(*a.shape[:-1], self.a_dim).float()
+        a = F.one_hot(a.long(), self.a_dim).reshape(*a.shape[:-1], self.a_dim).float()
         return self._guassian_head(
             self.dec_net, self.dec_mean, self.dec_std,
             phi_z, a, h
         )
 
     def prior(self, a, h):
-        a = F.one_hot(a.long(), self.a_dim).view(*a.shape[:-1], self.a_dim).float()
+        a = F.one_hot(a.long(), self.a_dim).reshape(*a.shape[:-1], self.a_dim).float()
         return self._guassian_head(
             self.prior_net, self.prior_mean, self.prior_std,
             a, h
@@ -124,18 +125,6 @@ class VAE(nn.Module):
             "mse_loss_os": mse_loss
         }
         return phi_x, phi_z, log
-
-    def cal_loss(self, x, enc_mean, enc_std, prior_mean, prior_std, dec_mean, dec_std):
-        kld_loss = self._kld_gauss(enc_mean, enc_std, prior_mean, prior_std)
-        nll_loss = self._nll_gauss(dec_mean, dec_std, x)
-        mse_loss = torch.pow(x - dec_mean, 2).sum(dim=-1)
-
-        log = {
-            "kld_loss": kld_loss,
-            "nll_loss": nll_loss,
-            "mse_loss": mse_loss
-        }
-        return log
 
     def _eval_z_usage(self, x, a, h):
         with torch.no_grad():
@@ -206,8 +195,11 @@ class VAE(nn.Module):
     def _guassian_head(self, net, mean_layer, std_layer, *inputs):
         x = net(torch.cat(inputs, dim=-1))
         x_mean, x_std = mean_layer(x), std_layer(x)
-        x_std = EPS + (1.0 - EPS) * torch.sigmoid(x_std) # limited within [EPS, 1.0]
-        # x_std = F.softplus(x_std) + EPS
+        if self.max_std is not None:
+            x_std = EPS + (self.max_std - EPS) * torch.sigmoid(x_std) # limited within [EPS, 1.0]
+        else:
+            x_std = F.softplus(x_std) + EPS
+
         if self.set_std_to_1:
             x_std = torch.ones_like(x_std)
         return x_mean, x_std
