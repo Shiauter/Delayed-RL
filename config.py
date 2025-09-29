@@ -5,11 +5,11 @@ import json
 @dataclass
 class Config:
     # env
-    env_name: str
+    env_name: str = "CartPole-v1"
     env_seed: int = None
     s_size: int = field(init=False)
     a_size: int = field(init=False)
-    delay: int = 2
+    delay: int = field(init=False)
     hidden_size: int = 64
     h0: list = field(init=False)
     T_horizon: int = 500
@@ -56,15 +56,16 @@ class Config:
     device: str = "cpu" # bug: GPU is slower than CPU
     do_save: bool = True
     do_train: bool = True
+    do_record: bool = False
 
     # S/L
     model_root: str = "./models"
-    experiment_name = f"{reconst_loss_method}_{pred_s_source}_delay_{delay}_{learning_mode}"
+    experiment_name: str = field(init=False)
     model_name: str = "action_delay.tar"
     log_root: str = "./logs" # used in tensorboard
-    log_dir = f"{log_root}/meeting_2025_09_19/vrnn_v2_baseline/{experiment_name}"
-    saved_folder = f"{model_root}/{experiment_name}"
-    record_dir =f"{saved_folder}/records"
+    log_dir: str = field(init=False)
+    saved_folder: str = field(init=False)
+    record_dir: str = field(init=False)
     record_interval: int = 10 # every n epoch
 
 
@@ -76,6 +77,25 @@ class Config:
 
         self.h0 = [1, 1, self.hidden_size]
         self.p_iters = self.delay
+
+    def _refresh_path_args(self):
+        self.experiment_name = f"{self.reconst_loss_method}_{self.pred_s_source}_delay_{self.delay}_{self.learning_mode}"
+        self.log_dir = f"{self.log_root}/meeting_2025_10_03/vrnn_v2_test_rollout_residual/{self.experiment_name}"
+        self.saved_folder = f"{self.model_root}/{self.experiment_name}"
+        self.record_dir =f"{self.saved_folder}/records"
+
+    def apply_args_override(self, delay: int=None, reconst_loss_method: str=None):
+        if delay is not None:
+            self.delay = delay
+            self.p_iters = delay
+        else:
+            raise ValueError(f"Unsupported delay: {delay}")
+
+        if reconst_loss_method in {"NLL", "MSE"}:
+            self.reconst_loss_method = reconst_loss_method
+        # reconst_loss_method == None => using default method
+
+        self._refresh_path_args()
 
     def get_json(self):
         config_dict = asdict(self)

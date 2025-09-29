@@ -88,13 +88,14 @@ def merge_dict(*dicts):
     return result
 
 
-def check_dir_exist(log_dir: str = None, saved_folder: str = None, record_dir: str = None):
+def check_saves_exist(log_dir: str = None, saved_folder: str = None):
     if log_dir is not None and os.path.exists(log_dir):
         clear_dir(log_dir)
 
     if saved_folder is not None and not os.path.exists(saved_folder):
         os.makedirs(saved_folder)
 
+def check_record_exist(record_dir: str = None):
     if record_dir is not None:
         if not os.path.exists(record_dir):
             os.makedirs(record_dir)

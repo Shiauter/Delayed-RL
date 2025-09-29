@@ -43,7 +43,7 @@ class VAE(nn.Module):
         self.enc_std = nn.Linear(h_dim, z_dim)
 
         self.prior_net = nn.Sequential(
-            nn.Linear(a_dim + h_dim, h_dim),
+            nn.Linear(a_dim + h_dim + x_dim, h_dim),
             nn.ReLU(),
             nn.Linear(h_dim, h_dim),
             nn.ReLU()
@@ -73,21 +73,21 @@ class VAE(nn.Module):
             phi_z, a, h
         )
 
-    def prior(self, a, h):
+    def prior(self, a, h, s):
         a = F.one_hot(a.long(), self.a_dim).reshape(*a.shape[:-1], self.a_dim).float()
         return self._guassian_head(
             self.prior_net, self.prior_mean, self.prior_std,
-            a, h
+            a, h, s
         )
 
-    def teacher_forcing(self, x, a, h):
+    def teacher_forcing(self, x, a, h, s):
         phi_x = self.phi_x(x) # truth state
         enc_mean, enc_std = self.enc(phi_x, h)
         z_t = self._reparameterized_sample(enc_mean, enc_std, "sampled")
         phi_z = self.phi_z(z_t)
         dec_mean, dec_std = self.dec(phi_z, a, h)
 
-        prior_mean_t, prior_std_t = self.prior(a, h) # pred state
+        prior_mean_t, prior_std_t = self.prior(a, h, s) # pred state
 
         kld_loss = self._kld_gauss(enc_mean, enc_std, prior_mean_t, prior_std_t)
         nll_loss = self._nll_gauss(dec_mean, dec_std, x)
@@ -99,7 +99,7 @@ class VAE(nn.Module):
             "mse_loss": mse_loss,
             "dec_std": dec_std.mean(dim=-1)
         }
-        log.update(self._eval_z_usage(x, a, h))
+        log.update(self._eval_z_usage(x, a, h, s))
 
         tf_cache = {
             "enc_mean": enc_mean.detach(),
@@ -126,7 +126,7 @@ class VAE(nn.Module):
         }
         return phi_x, phi_z, log
 
-    def _eval_z_usage(self, x, a, h):
+    def _eval_z_usage(self, x, a, h, s):
         with torch.no_grad():
             phi_x = self.phi_x(x) # truth state
             enc_mean, enc_std = self.enc(phi_x, h)
@@ -136,7 +136,7 @@ class VAE(nn.Module):
             mse_post = ((x - dec_mean_post)**2).sum(-1).mean()
             nll_post = self._nll_gauss(dec_mean_post, dec_std_post, x).mean()
 
-            prior_mean, prior_std = self.prior(a, h)
+            prior_mean, prior_std = self.prior(a, h, s)
             z_prior = self._reparameterized_sample(prior_mean, prior_std, self.z_source)
             phi_z_prior = self.phi_z(z_prior)
             dec_mean_prior, dec_std_prior = self.dec(phi_z_prior, a, h)
@@ -177,11 +177,11 @@ class VAE(nn.Module):
 
         return phi_x, phi_z
 
-    def rollout(self, a, h):
+    def rollout(self, a, h, s):
         # a = (batch, 1)
         # h = (batch, hidden_size)
 
-        prior_mean, prior_std = self.prior(a, h)
+        prior_mean, prior_std = self.prior(a, h, s)
         z_t = self._reparameterized_sample(prior_mean, prior_std, self.z_source)
         phi_z = self.phi_z(z_t)
 

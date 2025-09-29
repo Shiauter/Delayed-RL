@@ -6,9 +6,9 @@ from torch.distributions import Categorical
 import time
 from torchviz import make_dot
 
-from actor_vrnn_v2 import Actor
+from actor_control_group import Actor
 from util import Memory, clamp
-from config import Config
+from config_control_group import Config
 
 EPS = 1e-6
 
@@ -74,96 +74,30 @@ class Learner:
         return s, a, r, s_prime, done, prob_a, a_lst, v
 
     # region pred_model
-    def _os_loop(self, s_all, a_lsts, tf_cache):
-        log = {
-            "kld_loss_os": [],
-            "nll_loss_os": [],
-            "mse_loss_os": []
-        }
+    def make_pred_s_tis(self, s, a_lsts, h_in):
+        s, a_lsts = s.split(1, dim=1), a_lsts.split(1, dim=1)
+        s_ti = []
+        for i in range(len(s)):
+            _, h_out, pred_s = self.actor.pred_present(s[i], a_lsts[i], h_in)
+            s_ti.append(pred_s)
+            h_in = h_out
+        return torch.cat(s_ti, dim=0)
 
-        a_lst = torch.split(a_lsts, 1, dim=1)
-        for t in range(len(tf_cache["h"]) - self.delay):
-            a = torch.split(a_lst[t], 1, dim=-1)
-            h_rollout = tf_cache["h"][t].detach()
-            log_step = {
-                "kld_loss_os": [],
-                "nll_loss_os": [],
-                "mse_loss_os": []
-            }
-            for i in range(len(a) - 1):
-                target_s = s_all[t + i + 1]
-                enc_mean, enc_std = tf_cache["enc_mean"][t + i], tf_cache["enc_std"][t + i]
-                phi_x, phi_z, log_rollout_step = self.actor.pred_model.overshooting(target_s, a[i], h_rollout, enc_mean, enc_std)
-                cond_in = torch.cat([phi_x, phi_z], dim=-1)
-                pred_o, h_rollout = self.actor.rnn(cond_in, h_rollout)
-
-                for k in log_step.keys():
-                    log_step[k].append(log_rollout_step[k])
-
-            for k in log.keys():
-                log[k].append(torch.stack(log_step[k]))
-
-        for k in log.keys():
-            log[k] = torch.stack(log[k]).mean()
-        return log
-
-    def _tf_loop(self, s, a_lsts, first_hidden):
-        # s       -> (batch=1, ep_len, s_size) # current s
-        # a_lsts  -> (batch=1, ep_len, delay)
-        # h       -> (seq_len=1, batch=1, hidden_size)
-
-        # predicting one step future state using true state
-        a = torch.split(a_lsts, 1, dim=-1)[0].split(1, dim=1) # split into actions
-        phi_x, phi_z = self.actor.pred_model(s[0], first_hidden)
-        cond_in = torch.cat([phi_x, phi_z], dim=-1)
-        _, h = self.actor.rnn(cond_in, first_hidden)
-
-        log = {
-            "kld_loss": [],
-            "nll_loss": [],
-            "mse_loss": [],
-            "dec_std": [],
-            "delta_mse_prior": [],
-            "delta_mse_zero": [],
-            "delta_mse_shuf": [],
-            "delta_nll_prior": [],
-            "delta_nll_zero": [],
-            "delta_nll_shuf": [],
-        }
-
-        tf_cache = {
-            "enc_mean": [],
-            "enc_std": [],
-            "h": []
-        }
-        for t in range(1, len(s)):
-            phi_x, phi_z, tf_cache_step, log_step = \
-                self.actor.pred_model.teacher_forcing(s[t], a[t - 1], h, s[t - 1])
-            cond_in = torch.cat([phi_x, phi_z], dim=-1)
-            _, h = self.actor.rnn(cond_in, h)
-
-            for k in log.keys():
-                log[k].append(log_step[k])
-
-            for k in tf_cache.keys():
-                tf_cache[k].append(tf_cache_step[k])
-
-        dec_std_log = {
-            "dec_std_mean": torch.stack(log["dec_std"]).mean(),
-            "dec_std_max": torch.stack(log["dec_std"]).max(),
-            "dec_std_min": torch.stack(log["dec_std"]).min()
-        }
-        for k in log.keys():
-            log[k] = torch.stack(log[k]).mean()
-        del log["dec_std"]
-        log.update(dec_std_log)
-
-        return log, tf_cache
+    def make_offset_seq(self, s, offset: tuple, limit):
+        # idx = torch.arange(limit).unsqueeze(1) + torch.arange(offset[0], offset[1]).unsqueeze(0)
+        # idx = idx.clamp(max=len(s) - 1)
+        # target = s[idx].view(offset[1] - offset[0], -1, self.s_size)
+        target = s.unfold(dimension=1, size=self.delay+1, step=1).squeeze(0).permute(0, 2, 1)
+        target = target[:, 1:, :]
+        return target
 
     def _cal_pred_model_loss(self, s, a_lsts, first_hidden, s_prime):
-        s = torch.cat([s[:, :, :], s_prime[:, -1, :].unsqueeze(1)], dim=1).split(1, dim=1)
-        log_tf, tf_cache = self._tf_loop(s, a_lsts, first_hidden)
-        return log_tf, (s, a_lsts, tf_cache)
+        limit = s.size(1) - self.actor.delay
+        target = self.make_offset_seq(s, (1, self.p_iters + 1), limit)
+        pred = self.make_pred_s_tis(s[:, :limit, :], a_lsts[:, :limit, :], first_hidden)
+        mse_loss = F.mse_loss(pred, target)
+        log = {"mse_loss": mse_loss}
+        return log
     # endregion
 
     # region policy
@@ -200,11 +134,7 @@ class Learner:
         res = {"pi": [], "h_out": [], "v": []}
         for i in range(len(s)):
             if i >= len(s) - self.delay: break
-            with torch.no_grad():
-                o, h_out = self.actor.pred_present(s[i], a_lsts[i], h_in)
-            x = torch.cat([o, s[i]], dim=-1)
-            pi = self.actor.policy.pi(x)
-            v  = self.actor.policy.v(x)
+            _, pi, h_out, v = self.actor.sample_action(s[i], a_lsts[i], h_in)
             h_in = h_out
             if second_hidden is None: second_hidden = h_out
 
@@ -304,10 +234,7 @@ class Learner:
         # pred_model_loss, ppo_loss, total_loss are added in training function
         keys = [
             # pred model
-            "kld_loss", "nll_loss", "mse_loss",
-            "dec_std_mean", "dec_std_max", "dec_std_min",
-            "delta_mse_prior", "delta_mse_zero", "delta_mse_shuf",
-            "delta_nll_prior", "delta_nll_zero", "delta_nll_shuf",
+            "mse_loss",
 
             # policy
             "policy_loss", "critic_loss",
@@ -332,10 +259,7 @@ class Learner:
                     first_hidden = memory_list[i].h0.detach().to(self.device)
 
                     log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
-                    if self.reconst_loss_method == "NLL":
-                        total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["nll_loss"])
-                    elif self.reconst_loss_method == "MSE":
-                        total_pred_model_loss.append(log_pred_model["kld_loss"] + log_pred_model["mse_loss"])
+                    total_pred_model_loss.append(log_pred_model["mse_loss"])
 
                     for k in log_pred_model.keys():
                         log[k].append(log_pred_model[k])
@@ -384,66 +308,42 @@ class Learner:
 
                 self._draw_graph(total_ppo_loss, self.actor, "ppo_loss")
                 self.optimizers["policy"].zero_grad()
+                if "rnn" in self.optimizers: self.optimizers["rnn"].zero_grad()
                 total_ppo_loss.mean().backward()
-                # torch.nn.utils.clip_grad_norm_(self.actor.policy.parameters(), 1.0)
                 self.optimizers["policy"].step()
+                if "rnn" in self.optimizers: self.optimizers["rnn"].step()
             # print(f"policy training: {time.time() - check_point} sec.")
 
             check_point = time.time()
-            for epoch in range(self.epoch_pred_model):
-                total_pred_model_loss = []
-                rollout_input_all = []
-                for i in range(self.num_memos):
-                    s, a, r, s_prime, done, prob_a, a_lst, _ = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
-                    first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
+            if self.actor.used_method == "P_Model" and self.delay > 0:
+                for epoch in range(self.epoch_pred_model):
+                    total_pred_model_loss = []
+                    rollout_input_all = []
+                    for i in range(self.num_memos):
+                        s, a, r, s_prime, done, prob_a, a_lst, _ = self._make_batch(memory_list[i]) # (batch=1, seq_len, data_size)
+                        first_hidden = memory_list[i].h0.detach().to(self.device) # (seq_len, batch, hidden_size)
 
-                    log_pred_model, rollout_input = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
-                    if self.reconst_loss_method == "NLL":
-                        total_pred_model_loss.append(
-                            log_pred_model["kld_loss"] + log_pred_model["nll_loss"]
-                        )
-                    elif self.reconst_loss_method == "MSE":
-                        total_pred_model_loss.append(
-                            log_pred_model["kld_loss"] + log_pred_model["mse_loss"]
-                        )
+                        log_pred_model = self._cal_pred_model_loss(s, a_lst, first_hidden, s_prime)
+                        total_pred_model_loss.append(log_pred_model["mse_loss"])
 
-                    rollout_input_all.append(rollout_input)
+                        for k in log.keys():
+                            if k in log_pred_model:
+                                log[k].append(log_pred_model[k])
 
-                    for k in log.keys():
-                        if k in log_pred_model:
-                            log[k].append(log_pred_model[k])
+                    total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
+                    log["pred_model_loss"].append(total_pred_model_loss)
+                    # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
 
-                total_pred_model_loss = torch.stack(total_pred_model_loss).mean()
-                log["pred_model_loss"].append(total_pred_model_loss)
-                # print(f"total_pred_model_loss: {total_pred_model_loss} / ep. {epoch + 1}")
-
-                if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
-                    self._draw_graph(total_pred_model_loss, self.actor, "pred_model_loss")
-                    # tf
-                    self.optimizers["pred_model"].zero_grad()
-                    self.optimizers["rnn"].zero_grad()
-                    total_pred_model_loss.mean().backward()
-                    torch.nn.utils.clip_grad_norm_(self.actor.pred_model.parameters(), 1.0)
-                    self.optimizers["pred_model"].step()
-                    self.optimizers["rnn"].step()
-
-                    # os
-                    if self.delay > 0 and self.do_os:
-                        total_pred_model_loss_os = []
-                        for i, data in enumerate(rollout_input_all):
-                            log_os = self._os_loop(data[0], data[1], data[2])
-                            total_pred_model_loss_os.append(
-                                log_os["kld_loss_os"] + log_os["nll_loss_os"]
-                            )
-
+                    if self.pause_update_ep is None or current_episode <= self.pause_update_ep:
+                        self._draw_graph(total_pred_model_loss, self.actor, "pred_model_loss")
                         self.optimizers["pred_model"].zero_grad()
                         self.optimizers["rnn"].zero_grad()
-                        total_pred_model_loss_os = torch.stack(total_pred_model_loss_os).mean() * self.rollout_loss_weight
-                        total_pred_model_loss_os.mean().backward()
+                        total_pred_model_loss.mean().backward()
                         torch.nn.utils.clip_grad_norm_(self.actor.pred_model.parameters(), 1.0)
-                        torch.nn.utils.clip_grad_norm_(self.actor.rnn.parameters(), 0.5)
                         self.optimizers["pred_model"].step()
                         self.optimizers["rnn"].step()
+            else:
+                total_pred_model_loss = torch.tensor(0)
 
             # print(f"pred_model training: {time.time() - check_point} sec.")
             avg_loss_str = f"pred_model->{total_pred_model_loss:.6f}, policy->{total_ppo_loss:.6f}"
@@ -465,33 +365,34 @@ class Learner:
     def _init_optim(self, config: Config):
         optimizers = {}
         if self.learning_mode == "joint":
-            optimizers["joint"] = optim.Adam(
-                [
-                    {"params": self.actor.rnn.parameters()},
-                    {"params": self.actor.policy.parameters()},
-                    {"params": self.actor.pred_model.parameters()}
-                ],
-                lr=self.lr_joint
-            )
+            params = []
+            if hasattr(self.actor, "rnn"): params.append({"params": self.actor.rnn.parameters()})
+            if hasattr(self.actor, "policy"): params.append({"params": self.actor.policy.parameters()})
+            if hasattr(self.actor, "pred_model"): params.append({"params": self.actor.pred_model.parameters()})
+            optimizers["joint"] = optim.Adam(params, lr=self.lr_joint)
+
         elif self.learning_mode == "separate":
-            optimizers["pred_model"] = optim.Adam(
-                [
-                    {"params": self.actor.pred_model.parameters()},
-                ],
-                lr=self.lr_pred_model
-            )
-            optimizers["policy"] = optim.Adam(
-                [
-                    {"params": self.actor.policy.parameters()}
-                ],
-                lr=self.lr_policy
-            )
-            optimizers["rnn"] = optim.Adam(
-                [
-                    {"params": self.actor.rnn.parameters()}
-                ],
-                lr=self.lr_pred_model
-            )
+            if hasattr(self.actor, "pred_model"):
+                optimizers["pred_model"] = optim.Adam(
+                    [
+                        {"params": self.actor.pred_model.parameters()},
+                    ],
+                    lr=self.lr_pred_model
+                )
+            if hasattr(self.actor, "policy"):
+                optimizers["policy"] = optim.Adam(
+                    [
+                        {"params": self.actor.policy.parameters()}
+                    ],
+                    lr=self.lr_policy
+                )
+            if hasattr(self.actor, "rnn"):
+                optimizers["rnn"] = optim.Adam(
+                    [
+                        {"params": self.actor.rnn.parameters()}
+                    ],
+                    lr=self.lr_pred_model
+                )
         else:
             raise ValueError(f"Unknown learning_mode: {config.learning_mode}")
 
@@ -506,11 +407,12 @@ class Learner:
                 cooldown=2, min_lr=5e-5
             )
         elif self.learning_mode == "separate":
-            schedulers["pred_model"] = sched.ReduceLROnPlateau(
-                self.optimizers["pred_model"], mode='min', factor=0.5, patience=6,
-                threshold=1e-3, threshold_mode='rel',
-                cooldown=2, min_lr=5e-5
-            )
+            if "pred_model" in self.optimizers:
+                schedulers["pred_model"] = sched.ReduceLROnPlateau(
+                    self.optimizers["pred_model"], mode='min', factor=0.5, patience=6,
+                    threshold=1e-3, threshold_mode='rel',
+                    cooldown=2, min_lr=5e-5
+                )
             schedulers["policy"] = sched.LambdaLR(
                 self.optimizers["policy"],
                 lr_lambda=lambda u: max(0.5, 1.0 - u / config.K_epoch_training)
@@ -529,11 +431,10 @@ class Learner:
                 self.schedulers["pred_model"].step(nll_loss)
                 # self.schedulers["policy"].step()
                 self._lr_adapter_policy(kld_policy, clipfrac)
-            return {
-                "lr_pred_model": self.optimizers["pred_model"].param_groups[0]['lr'],
-                "lr_policy": self.optimizers["policy"].param_groups[0]['lr']
-            }
-
+            out = {"lr_policy": self.optimizers["policy"].param_groups[0]['lr']}
+            if "pred_model" in self.optimizers:
+                out["lr_pred_model"] = self.optimizers["pred_model"].param_groups[0]['lr']
+            return out
     def _lr_adapter_policy(self, kld, clipfrac,
             target_kl=0.01, low=5e-5, high=1e-3, down=0.8, up=1.2):
         for g in self.optimizers["policy"].param_groups:

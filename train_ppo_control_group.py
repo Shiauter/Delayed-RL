@@ -4,10 +4,10 @@ import torch.multiprocessing as mp
 from torch.utils.tensorboard import SummaryWriter
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
-from actor_vrnn_v2 import Actor
-from learner_vrnn_v2 import Learner
+from actor_control_group import Actor
+from learner_control_group import Learner
 from util import Memory, merge_dict, check_saves_exist, check_record_exist, action_data_sample
-from config import Config
+from config_control_group import Config
 
 import argparse
 
@@ -182,11 +182,11 @@ if __name__ == "__main__":
 
     p = argparse.ArgumentParser(allow_abbrev=False)
     p.add_argument("--delay", type=int)
-    p.add_argument("--reconst_loss_method", type=str, default=None)
+    p.add_argument("--used_method", type=str)
     args = p.parse_args()
 
     config = Config()
-    config.apply_args_override(delay=args.delay, reconst_loss_method=args.reconst_loss_method)
+    config.apply_args_override(delay=args.delay, used_method=args.used_method)
 
     actor = Actor(config)
     learner = Learner(config)

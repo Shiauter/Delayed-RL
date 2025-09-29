@@ -99,7 +99,7 @@ class Actor:
         # rollout
         a_lst = torch.split(a_lst, 1, dim=-1)
         for p in range(self.p_iters):
-            phi_x, phi_z = self.pred_model.rollout(a_lst[p], pred_h)
+            phi_x, phi_z = self.pred_model.rollout(a_lst[p], pred_h, s)
             cond_in = torch.cat([phi_x, phi_z], dim=-1)
             pred_o, pred_h = self.rnn(cond_in, pred_h)
 
